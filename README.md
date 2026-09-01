@@ -1,235 +1,346 @@
-<div align="center">
+# Scent Molecule Studio
 
-# 🧪 AI Olfactory R&D Lab
+Structure analysis and candidate design for fragrance R&D.
 
-**Nền tảng nghiên cứu hương liệu kết hợp dự đoán mùi đa nhãn và sinh phân tử SMILES**
+[![CI](https://github.com/MutAquaticStudio/ai-olfactory-rd-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/MutAquaticStudio/ai-olfactory-rd-lab/actions/workflows/tests.yml)
+[![Python 3.10–3.12](https://img.shields.io/badge/Python-3.10%E2%80%933.12-008080)](https://www.python.org/)
+[![React 19](https://img.shields.io/badge/React-19-00A896)](https://react.dev/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-008080)](https://fastapi.tiangolo.com/)
+[![Research prototype](https://img.shields.io/badge/status-research%20prototype-475569)](#research-boundaries)
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-008080?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-Judge%20%2B%20Creator-00A896?style=flat-square&logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![RDKit](https://img.shields.io/badge/RDKit-Cheminformatics-008080?style=flat-square)](https://www.rdkit.org/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-R%26D%20Interface-00A896?style=flat-square&logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Status](https://img.shields.io/badge/Status-Research%20Prototype-5B7C7C?style=flat-square)](#giới-hạn--an-toàn-nghiên-cứu)
+Scent Molecule Studio is a local-first research platform for inspecting odorant
+structures, reviewing predicted odor descriptors, generating candidate SMILES,
+and collecting traceable sensory observations. A React/Vite workspace talks to
+a single FastAPI process backed by PyTorch and RDKit.
 
-</div>
+The product keeps four kinds of evidence separate:
 
-AI Olfactory R&D Lab là prototype phục vụ nghiên cứu mối quan hệ giữa **cấu trúc phân tử** và **hồ sơ mùi hương**. Hệ thống gồm hai thành phần:
+- **Prediction** — model probabilities for 113 odor descriptors.
+- **Chemistry screening** — configured structural and physicochemical rules.
+- **Reference verification** — identity and fragrance-catalog lookups.
+- **Experimental evidence** — sensory assessments with explicit provenance.
 
-- **The Judge** — nhận SMILES, tạo Morgan Fingerprint có xét chirality và dự đoán 113 nhãn mùi.
-- **The Creator** — dùng Char-LSTM sinh SMILES mới, lọc hợp lệ bằng RDKit, loại trùng với dữ liệu gốc và xếp hạng bằng Judge.
+It does not present generated structures as experimentally validated molecules
+or interpret a reference-source no-match as global novelty.
 
-Ứng dụng được đóng gói trong giao diện Streamlit hai tab với phong cách Teal/White, tối ưu cho macOS Apple Silicon qua MPS và tự động fallback về CPU.
+## Workspace
 
-## Mục lục
+### Molecule analysis
 
-- [Tính năng chính](#tính-năng-chính)
-- [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
-- [Dữ liệu và mô hình](#dữ-liệu-và-mô-hình)
-- [Cài đặt](#cài-đặt)
-- [Chạy ứng dụng](#chạy-ứng-dụng)
-- [Huấn luyện lại mô hình](#huấn-luyện-lại-mô-hình)
-- [Cấu trúc repository](#cấu-trúc-repository)
-- [Giới hạn và an toàn nghiên cứu](#giới-hạn--an-toàn-nghiên-cứu)
+- Parse and standardize a SMILES string with RDKit.
+- Display canonical and Isomeric SMILES plus a stereochemical 2D depiction.
+- Require stereo resolution before chiral prediction or 3D modeling.
+- Predict 113 descriptors from a 2,048-bit Morgan fingerprint
+  (`radius=2`, `useChirality=True`).
+- Project the flat output onto 11 Osmo-compatible primary facets, textures, and
+  sensations; the non-zero raw output remains available in a disclosure.
+- Build a high-fidelity ETKDGv3 ensemble and display up to five converged,
+  RMSD-clustered representatives with relative force-field energy.
+- Report chemistry-screen decisions, descriptors, model version, dataset
+  version, applicability-domain similarity, and reliability state.
 
-## Tính năng chính
+Unresolved structures show at most 16 stereoisomers. Prediction and 3D stay
+locked until a fully specified variant is selected. The same Isomeric SMILES is
+then used by both the chiral fingerprint and conformer pipeline.
 
-### 🔍 Phân tích Phân tử — The Judge
+### Candidate design
 
-- Nhận SMILES, bao gồm ký hiệu lập thể như `@`, `@@`, `/` và `\`.
-- Chuẩn hóa và hiển thị **Isomeric SMILES** cùng **Canonical SMILES**.
-- Vẽ cấu trúc 2D có Wedge/Dash để thể hiện thông tin stereochemistry khi đầu vào có khai báo.
-- Tạo Morgan Fingerprint với `radius=2`, `nBits=2048`, `useChirality=True`.
-- Hiển thị Top 5 nốt hương dự đoán dưới dạng xác suất.
+- Select one or more target descriptors and a sampling-diversity value.
+- Stream generation and screening progress with a cancellable request.
+- Remove invalid, duplicate, unresolved, rejected, known, and unverified
+  structures before ranking.
+- Auto-enumerate at most four stereo variants per candidate and keep at most one
+  representative per connectivity.
+- Rank accepted candidates with the existing geometric target-fit score:
 
-### 🔮 Sáng tạo Captive — Creator + Judge
+```text
+Target fit = exp(mean(log(P(selected target descriptors))))
+```
 
-- Chọn một hoặc nhiều nốt hương mục tiêu từ 113 nhãn.
-- Điều chỉnh Temperature từ `0.2` đến `1.2`.
-- Char-LSTM sinh ứng viên SMILES; RDKit loại chuỗi sai cú pháp hoặc hóa trị.
-- Canonical hóa và loại ứng viên đã có trong `clean_dataset.csv` bằng tra cứu `set` O(1).
-- Auto-retry tối đa 200 lần để thu thập 5 ứng viên hợp lệ và không trùng trong batch.
-- Tính **Accord Score** bằng trung bình nhân xác suất các nốt hương mục tiêu:
+- Display the top three candidates with 2D/3D structure, descriptors, target
+  probabilities, supporting descriptors, chemistry evidence, and reference
+  evidence.
+- Keep chemistry and reference-review items outside the shortlist.
 
-\[
-\text{Accord Score} =
-\left(\prod_{i=1}^{N} P(\text{target}_i)\right)^{1/N}
-\]
+The loop stops at five accepted structures, 200 attempts, or 120 seconds.
+Results and controls survive navigation between workspace routes but remain
+session-only and are cleared by a full browser refresh.
 
-- Xếp hạng Top 3 Candidate và hiển thị cấu trúc, SMILES, công thức hóa học, Exact MW, LogP, tầng hương cùng hồ sơ mùi dự đoán.
+### Data intake
 
-## Kiến trúc hệ thống
+- Record a manual blinded sensory assessment.
+- Import CSV or XLSX through `Upload → Validate → Preview → Commit`.
+- Preserve `PRESENT`, `ABSENT`, and `UNASSESSED` as distinct label states.
+- Validate structure, stereo, descriptor vocabulary, units, duplicates,
+  identifiers, experimental fields, and source provenance.
+- Store append-only source records and create immutable Parquet snapshots with
+  SHA-256 manifests.
+
+Local scientific data defaults to `~/.scent-molecule-studio/` and is excluded
+from Git. Set `SCENT_STUDIO_DATA_DIR` to use another private location.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[clean_dataset.csv] --> B[Canonicalize với RDKit]
-    B --> C[existing_smiles_set]
-    A --> D[Char Vocabulary]
-    D --> E[SMILES Char-LSTM]
-    E --> F[SMILES Candidates]
-    F --> G[RDKit Validity Filter]
-    C --> H[Novelty Filter]
-    G --> H
-    H --> I[Morgan FP r=2, 2048 bit, Chirality]
-    I --> J[OdorPredictor — 113 labels]
-    J --> K[Geometric Mean Accord Score]
-    K --> L[Top 3 Candidate R&D]
+    UI[React + TypeScript] -->|JSON / SSE| API[FastAPI]
+    API --> Judge[Odor descriptor model]
+    API --> Creator[SMILES sequence model]
+    API --> Chem[RDKit chemistry + 2D/3D]
+    API --> Data[(SQLite / Parquet)]
+    API --> PubChem[PubChem PUG REST]
+    API --> Catalogs[Licensed local catalog snapshots]
 ```
 
-### The Judge — `OdorPredictor`
+- FastAPI loads models, vocabulary, taxonomy, and the local reference set once
+  during application lifespan.
+- Production local mode uses one worker to avoid duplicating model and Apple MPS
+  memory.
+- FastAPI serves `/api/v1/*` and the built React single-page application from
+  the same origin.
+- Candidate status uses Server-Sent Events; no Redis, Celery, or background job
+  system is required.
 
-| Thành phần | Cấu hình |
-|---|---|
-| Input | Morgan Fingerprint 2.048 bit |
-| Hidden 1 | Linear 2.048 → 1.024, ReLU, Dropout 0.3 |
-| Hidden 2 | Linear 1.024 → 512, ReLU, Dropout 0.3 |
-| Output | Linear 512 → 113 logits |
-| Loss | `BCEWithLogitsLoss` |
-| Optimizer | Adam, learning rate `0.001` |
-| Training | Tối đa 100 epochs, Early Stopping patience 20 |
+## Requirements
 
-### The Creator — `SMILES_LSTM`
+- Python `>=3.10,<3.13`
+- Node.js 20 or newer
+- macOS, Linux, or Windows supported by the selected PyTorch/RDKit wheels
+- Apple MPS is used when available; CPU is the fallback
 
-| Thành phần | Cấu hình |
-|---|---|
-| Tokenization | Character-level + `<PAD>` + `<END>` |
-| Embedding | 128 chiều |
-| LSTM | Hidden size 256, 2 layers, dropout 0.2 |
-| Output | Linear 256 → vocabulary size |
-| Loss | `CrossEntropyLoss(ignore_index=pad_idx)` |
-| Optimizer | Adam, learning rate `0.002` |
-| Training | Cố định 100 epochs |
+The training-only Chemprop stack currently requires Python 3.11–3.12. The web
+application and baseline inference support Python 3.10–3.12.
 
-## Dữ liệu và mô hình
-
-| Tài nguyên | Nội dung |
-|---|---|
-| `clean_dataset.csv` | 3.522 SMILES đã chuẩn hóa cùng metadata mùi |
-| `one_hot_dataset.csv` | 3.522 mẫu với 113 cột nhãn mùi one-hot |
-| `odor_morgan_tensor_dataset.pt` | `X [3522, 2048]`, `Y [3522, 113]` và `label_names` |
-| `odor_predictor_weights.pth` | Trọng số tốt nhất của Judge |
-| `smiles_vocab.json` | Ánh xạ character ↔ index của Creator |
-| `smiles_creator_weights.pth` | Trọng số Char-LSTM |
-| `learning_curve.png` | Train/Test Loss của Judge |
-
-![Learning curve của OdorPredictor](learning_curve.png)
-
-## Cài đặt
-
-### 1. Clone repository
+## Quick start
 
 ```bash
 git clone git@github.com:MutAquaticStudio/ai-olfactory-rd-lab.git
 cd ai-olfactory-rd-lab
-```
 
-Repository hiện ở chế độ private, vì vậy tài khoản GitHub cần có quyền truy cập.
-
-### 2. Tạo môi trường Python
-
-```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+cd frontend
+npm ci
+cd ..
+
+PYTHON_BIN=.venv/bin/python ./run_local.sh
 ```
 
-### 3. Cài dependencies
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The production launcher
+binds only to `127.0.0.1` and starts one Uvicorn worker.
+
+Override the port or interpreter when needed:
 
 ```bash
-python -m pip install -r tensor_dataset_requirements.txt
-python -m pip install matplotlib
+PYTHON_BIN=python3.11 PORT=8080 ./run_local.sh
 ```
 
-Các dependency chính: PyTorch, RDKit, Streamlit, Pandas, NumPy và Matplotlib.
+### Development mode
 
-## Chạy ứng dụng
-
-Từ thư mục gốc của repository:
+Run the API and Vite dev server in separate terminals:
 
 ```bash
-streamlit run app.py
+# Terminal 1
+.venv/bin/python -m uvicorn olfactory.api:app \
+  --host 127.0.0.1 --port 8000 --workers 1
+
+# Terminal 2
+cd frontend
+npm run dev
 ```
 
-Streamlit sẽ mở giao diện tại `http://localhost:8501`. Model và dữ liệu được cache để tránh nạp lại trong mỗi lần tương tác.
+Vite proxies `/api` to the FastAPI process during development.
 
-## Huấn luyện lại mô hình
+## Model resources
 
-### Huấn luyện Judge
+The checked-in baseline application expects these resources in the repository
+root:
+
+| Resource | Contract |
+|---|---|
+| `clean_dataset.csv` | Local reference structures and catalog odor metadata |
+| `odor_morgan_tensor_dataset.pt` | `X [3522, 2048]`, `Y [3522, 113]`, ordered labels |
+| `odor_predictor_weights.pth` | `2048 → 1024 → 512 → 113` descriptor model |
+| `smiles_vocab.json` | Character vocabulary with `<PAD>` and `<END>` |
+| `smiles_creator_weights.pth` | Two-layer character LSTM weights |
+| `model_registry.json` | Active model/data/calibration metadata |
+
+The current weights are registered as a legacy scientific baseline. The web
+migration does not retrain or alter them. Candidate Judge v2 and Creator v2
+artifacts are written under ignored `artifacts/` paths and never overwrite the
+baseline files.
+
+## API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/health` | Server and model-resource readiness |
+| `GET /api/v1/meta` | Labels, limits, capabilities, versions, and providers |
+| `POST /api/v1/analysis` | Structure, stereo state, screen, prediction, and 3D |
+| `POST /api/v1/candidates/stream` | SSE candidate progress and completed ranking |
+| `GET /api/v1/data/templates` | Intake schema or CSV template |
+| `POST /api/v1/data/imports/validate` | Validate and stage a CSV/XLSX upload |
+| `POST /api/v1/data/imports/commit` | Commit a validated import token |
+| `POST /api/v1/assessments/validate` | Validate a manual sensory record |
+| `POST /api/v1/assessments` | Append a validated sensory record |
+| `GET /api/v1/datasets/versions` | List immutable local dataset snapshots |
+
+Product errors use stable codes and plain-language messages. Technical details
+remain collapsed in the UI; API responses do not expose stack traces.
+
+## Stereo and conformer policy
+
+The analysis contract has three states:
+
+- `STEREO_REQUIRED` — a bounded list of variants can be selected.
+- `STEREO_INPUT_REQUIRED` — too many variants; enter fully specified Isomeric
+  SMILES manually.
+- `COMPLETE` — chiral prediction and conformer modeling may run.
+
+For complete structures, the conformer service requests 50 ETKDGv3 conformers
+or 100 for protected macrocycles. It enforces chirality, uses macrocycle torsion
+and 1–4 bounds, retries MMFF94s minimization, and falls back to a separate UFF
+ensemble only when no MMFF conformer converges. Energies from different force
+fields are never mixed.
+
+Non-finite coordinates, heavy-atom clashes, connectivity changes, stereo
+round-trip changes, and unconverged conformers are removed. Representatives are
+clustered by heavy-atom RMSD and ordered by relative energy. The first displayed
+representative has `ΔE = 0`.
+
+## Chemistry and reference gates
+
+The chemistry screen returns `PASS`, `REVIEW`, or `REJECT`. Only `PASS` can be
+shortlisted. A protected macrocycle profile permits non-aromatic 15–17 member
+rings within its dedicated descriptor limits.
+
+Reference eligibility is fail-closed:
+
+```text
+chemistry PASS
+AND PubChem NO_MATCH
+AND every enabled fragrance catalog NO_MATCH
+```
+
+PubChem is queried through PUG REST `fastidentity` with
+`identity_type=same_stereo_isotope`. No identifier is transmitted until the
+user grants session consent. `MATCH`, `AMBIGUOUS`, and `UNVERIFIED` results do
+not enter the shortlist.
+
+TGSC and ScenTree adapters only accept licensed local snapshots. They do not
+scrape websites and remain `NOT_CONFIGURED` unless an operator supplies a valid
+manifest outside Git:
 
 ```bash
-python train_odor_model.py
+export TGSC_REFERENCE_MANIFEST=/private/references/tgsc-manifest.json
+export SCENTREE_REFERENCE_MANIFEST=/private/references/scentree-manifest.json
 ```
 
-Tùy chọn:
+A no-match result means only that no matching indexed record was found in the
+configured sources. It is not global novelty, commercial exclusivity, safety,
+or patent clearance.
+
+## Scientific development
+
+Install the separate training stack with Python 3.11–3.12:
 
 ```bash
-python train_odor_model.py \
-  --epochs 100 \
-  --batch-size 64 \
-  --learning-rate 0.001 \
-  --seed 42
+python3.12 -m venv .venv-training
+source .venv-training/bin/activate
+python -m pip install -r requirements-training.txt
 ```
 
-Script tái tạo fingerprint có chirality trực tiếp từ `clean_dataset.csv`, chia dữ liệu 80/20 và:
-
-- lưu best weights vào `odor_predictor_weights.pth`;
-- dừng sớm nếu Test Loss không cải thiện trong 20 epochs;
-- xuất learning curve vào `learning_curve.png`;
-- khôi phục best model và in Top 3 dự đoán cho một mẫu test ngẫu nhiên.
-
-### Huấn luyện Creator
+Core workflows:
 
 ```bash
-python train_creator.py
+# Audit the legacy weak-label baseline
+python audit_accuracy.py
+
+# Fixed grouped-split baselines
+python benchmark_baselines.py --snapshot /private/path/data-version.parquet
+
+# Grouped CV for Judge v2
+python benchmark_judge_v2.py --snapshot /private/path/data-version.parquet
+
+# Candidate model artifacts; never auto-promoted
+python train_judge_v2.py --snapshot /private/path/data-version.parquet
+python train_creator_v2.py --snapshot /private/path/data-version.parquet \
+  --target-descriptors fruity,floral
 ```
 
-Tùy chọn:
+Development splits group by connectivity InChIKey, then Murcko scaffold for
+cyclic structures or Butina clustering for acyclic structures. Random split is
+diagnostic only. Calibration is fitted on validation data, and the locked test
+set is not used for threshold selection.
+
+See [Scientific protocol](docs/SCIENTIFIC_PROTOCOL.md) for provenance schema,
+panel protocol, benchmark metrics, promotion gates, uncertainty, blind-panel
+validation, and Creator v2 criteria.
+
+## Testing
 
 ```bash
-python train_creator.py \
-  --batch-size 64 \
-  --learning-rate 0.002 \
-  --start-str C \
-  --max-len 60 \
-  --seed 42
+# Backend unit and API contracts
+.venv/bin/python -m pytest -q
+
+# Frontend unit tests and production build
+cd frontend
+npm test
+npm run build
+
+# Desktop/mobile browser workflows
+npx playwright install chromium
+npm run test:e2e
 ```
 
-Script đọc SMILES từ `clean_dataset.csv`, tạo lại `smiles_vocab.json`, huấn luyện đủ 100 epochs, lưu `smiles_creator_weights.pth` và sinh thử 10 mẫu với `temperature=0.8`.
+CI runs backend tests on Python 3.10 and 3.12 and frontend tests on Node 22,
+including desktop/mobile Playwright and accessibility checks.
 
-## Cấu trúc repository
+## Project layout
 
 ```text
 .
-├── app.py                              # Ứng dụng Streamlit Judge + Creator
-├── train_odor_model.py                 # Huấn luyện mô hình dự đoán mùi
-├── train_creator.py                    # Huấn luyện Char-LSTM sinh SMILES
-├── clean_dataset.csv                   # Dataset SMILES đã làm sạch
-├── ready_dataset.csv                   # Dataset sau bước thu thập/chuẩn hóa cột
-├── one_hot_dataset.csv                 # Nhãn mùi one-hot
-├── odor_morgan_tensor_dataset.pt       # TensorDataset X/Y + label_names
-├── odor_predictor_weights.pth          # Best weights của Judge
-├── smiles_vocab.json                   # Character vocabulary
-├── smiles_creator_weights.pth          # Weights của Creator
-├── learning_curve.png                  # Biểu đồ loss
-├── tensor_dataset_requirements.txt     # Python dependencies chính
-└── .streamlit/
-    └── config.toml                     # Theme Teal/White
+├── frontend/                 React, Vite, TypeScript, Vitest, Playwright
+├── olfactory/                FastAPI and molecular application services
+│   ├── data_foundation/      Intake, provenance, SQLite, snapshots
+│   └── training/             Split, metrics, calibration, v2 candidates
+├── data/                     Taxonomy mapping and source registry metadata
+├── docs/                     Scientific protocol and research documentation
+├── tests/                    Python unit and API contract tests
+├── run_local.sh              One-command local production launcher
+└── model_registry.json       Atomic production model selection
 ```
 
-## Giới hạn & an toàn nghiên cứu
+## Taxonomy and component attribution
 
-> [!IMPORTANT]
-> Đây là **research prototype**, không phải công cụ xác nhận mùi, độc tính, độ ổn định, khả năng tổng hợp hay tính tuân thủ pháp lý của một hợp chất.
+The repository vendors an explicit 113-label mapping for an
+**Osmo-compatible projection**. Category scores use weighted maximum; runtime
+does not fuzzy-map labels. No affiliation with or endorsement by Osmo is
+implied.
 
-- Xác suất đầu ra là dự đoán thống kê từ dữ liệu huấn luyện, không thay thế đánh giá cảm quan hoặc phép đo phòng thí nghiệm.
-- Nhãn **“100% Novel Captive”** chỉ có nghĩa Canonical SMILES chưa xuất hiện trong `clean_dataset.csv` và chưa trùng trong batch hiện tại. Nó **không chứng minh** phân tử mới đối với PubChem, ChEMBL, SciFinder, Reaxys, patent database hoặc prior art.
-- SMILES hợp lệ theo RDKit vẫn có thể đại diện cho phân tử khó tổng hợp, không bền, độc hại hoặc không phù hợp để sử dụng trong hương liệu.
-- Trước mọi thử nghiệm thực tế, cần đánh giá độc tính, IFRA, SDS, quy định địa phương, khả năng tổng hợp và quyền sở hữu trí tuệ bởi chuyên gia phù hợp.
+- [Osmo Scent Taxonomy](https://github.com/osmoai/taxonomy)
+- [ODbL attribution notice](data/OSMO_ODBL_NOTICE.md)
+- [Versioned mapping](data/odor_taxonomy_mapping_v1_2.json)
 
-## License
+Application-scoped Animated Content, Animated List, Spotlight Card, and Count Up
+components are adapted from [React Bits](https://www.reactbits.dev/). The
+vendored notice is at
+[`frontend/src/vendor/reactbits/NOTICE.md`](frontend/src/vendor/reactbits/NOTICE.md).
 
-Repository chưa phát hành kèm giấy phép mã nguồn mở. Mọi quyền được bảo lưu cho đến khi có file `LICENSE` chính thức.
+## Research boundaries
 
----
-
-<div align="center">
-  <sub>Built for molecular olfaction research with PyTorch, RDKit and Streamlit.</sub>
-</div>
+- Model outputs are predictions, not measured sensory observations.
+- Taxonomy projection reorganizes model output; it does not add evidence.
+- The 3D ensemble is an in-vacuum force-field calculation, not X-ray, NMR,
+  molecular dynamics, DFT, or a thermodynamic ensemble.
+- Chemistry screening is triage, not toxicity, IFRA, synthesis, regulatory, or
+  experimental-volatility assessment.
+- Generated candidates require expert review and laboratory validation before
+  real-world use.
+- Weak catalog labels contain missing and conflicting evidence; an omitted term
+  is not automatically a negative observation.
+- Applicability-domain similarity and uncertainty are warnings, not guarantees
+  of correctness.

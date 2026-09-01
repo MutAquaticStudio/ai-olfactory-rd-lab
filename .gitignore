@@ -20,3 +20,17 @@ htmlcov/
 .qa_*
 *.log
 
+frontend/node_modules/
+frontend/dist/
+frontend/.qa_playwright/
+frontend/test-results/
+frontend/playwright-report/
+frontend/*.tsbuildinfo
+
+# Local scientific data and model-run artifacts never belong in Git.
+.scent-molecule-studio/
+artifacts/
+mlruns/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal

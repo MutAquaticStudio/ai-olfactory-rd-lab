@@ -1,0 +1,26 @@
+{
+  "history": [],
+  "production": {
+    "creator": {
+      "architecture": "char-lstm-v1",
+      "calibration_version": null,
+      "dataset_sha256": "026f0cc0bfe6c877ea0ad7539c49e9fb236baa5bf6eb6dda425bef85fba1b26f",
+      "dataset_version": "legacy-clean-3522",
+      "model_version": "creator-v1-legacy",
+      "status": "LEGACY_BASELINE",
+      "weights_path": "smiles_creator_weights.pth",
+      "weights_sha256": "18551db3eb8eba6ff05c9b29000f263a3fbd30d51c7788119b433ee1b323b865"
+    },
+    "judge": {
+      "architecture": "morgan-mlp-v1",
+      "calibration_version": "uncalibrated",
+      "dataset_sha256": "078a0dee494baed433129f880c7a6f8832dd07fb0d98a26496def54392b0f078",
+      "dataset_version": "legacy-clean-3522",
+      "model_version": "judge-v1-legacy",
+      "status": "LEGACY_BASELINE",
+      "weights_path": "odor_predictor_weights.pth",
+      "weights_sha256": "73b48d8e9631b4e6e0a42aa6895d7b5c1ab5306444f3df4d28e4864db110c953"
+    }
+  },
+  "schema_version": 1
+}

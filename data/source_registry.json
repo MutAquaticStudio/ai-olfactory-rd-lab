@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "pyrfume_code_commit": "bd5159b28439e8e9460755c59009472ed46cbcaa",
+  "pyrfume_data_commit": "8054ea98ed675005ec10e67359902f500e4911b0",
+  "archives": {
+    "leffingwell": {
+      "quality_tier": "WEAK_LABEL_CATALOG",
+      "license_status": "REVIEW_REQUIRED",
+      "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "behavior_sparse.csv"],
+      "training_semantics": "Positive catalog mentions only; omitted descriptors remain UNASSESSED."
+    },
+    "goodscents": {
+      "quality_tier": "WEAK_LABEL_CATALOG",
+      "license_status": "REVIEW_REQUIRED",
+      "files": ["manifest.toml", "README.md", "molecules.csv", "stimuli.csv", "behavior.csv"],
+      "training_semantics": "Positive catalog mentions only; omitted descriptors remain UNASSESSED."
+    },
+    "dravnieks_1985": {
+      "quality_tier": "QUANTITATIVE_PANEL_AGGREGATE",
+      "license_status": "REVIEW_REQUIRED",
+      "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "behavior_1.csv", "behavior_2.csv"],
+      "training_semantics": "Preserve applicability and use measures as separate source domains."
+    },
+    "keller_2012": {
+      "quality_tier": "QUANTITATIVE_PANEL",
+      "license_status": "REVIEW_REQUIRED",
+      "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "subjects.csv", "behavior_1.csv", "behavior_2.csv", "behavior_3.csv", "behavior_4.csv"],
+      "training_semantics": "Preserve threshold, descriptor, intensity and pleasantness tables as distinct measurements."
+    },
+    "keller_2016": {
+      "quality_tier": "QUANTITATIVE_PANEL_REPLICATED",
+      "license_status": "REVIEW_REQUIRED",
+      "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "subjects.csv", "behavior.csv"],
+      "training_semantics": "Preserve subject and replicate identifiers; do not aggregate during ingestion."
+    }
+  }
+}
