@@ -55,26 +55,31 @@ def _clean_smiles_values(values: Sequence[object]) -> List[str]:
     return smiles_list
 
 
-def load_smiles() -> List[str]:
-    """Đọc trực tiếp toàn bộ danh sách SMILES từ clean_dataset.csv."""
-    if not CLEAN_DATASET_PATH.exists():
-        raise FileNotFoundError(f"Không tìm thấy dataset: {CLEAN_DATASET_PATH}")
+def load_smiles(data_path: Path = CLEAN_DATASET_PATH) -> List[str]:
+    """Read the SMILES corpus from an explicit, auditable CSV path."""
+    data_path = Path(data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Không tìm thấy dataset: {data_path}")
 
-    dataframe = pd.read_csv(CLEAN_DATASET_PATH)
+    dataframe = pd.read_csv(data_path)
     smiles_column = next(
-        (column for column in dataframe.columns if column.lower() == "smiles"),
+        (
+            column
+            for column in dataframe.columns
+            if column.lower() in {"smiles", "isomeric_smiles"}
+        ),
         None,
     )
     if smiles_column is None:
-        raise ValueError(f"{CLEAN_DATASET_PATH.name} không có cột SMILES.")
+        raise ValueError(f"{data_path.name} không có cột SMILES.")
 
     smiles_list = _clean_smiles_values(dataframe[smiles_column].tolist())
     if not smiles_list:
-        raise ValueError(f"Không có SMILES hợp lệ trong {CLEAN_DATASET_PATH.name}.")
+        raise ValueError(f"Không có SMILES hợp lệ trong {data_path.name}.")
 
     print(
         f"Đã nạp {len(smiles_list)} chuỗi SMILES từ "
-        f"{CLEAN_DATASET_PATH.name}."
+        f"{data_path.name}."
     )
     return smiles_list
 
@@ -92,17 +97,20 @@ def build_vocabulary(
 def save_vocabulary(
     char_to_idx: Dict[str, int],
     idx_to_char: Sequence[str],
+    output_path: Path = VOCAB_PATH,
 ) -> None:
-    """Persist both vocabulary mappings for reuse by the Streamlit app."""
+    """Persist both vocabulary mappings for reuse by the web application."""
     vocabulary = {
         "char_to_idx": char_to_idx,
         "idx_to_char": list(idx_to_char),
         "pad_token": PAD_TOKEN,
         "end_token": END_TOKEN,
     }
-    with VOCAB_PATH.open("w", encoding="utf-8") as file:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as file:
         json.dump(vocabulary, file, ensure_ascii=False, indent=2)
-    print(f"Đã lưu bộ từ vựng ({len(idx_to_char)} token): {VOCAB_PATH.name}")
+    print(f"Đã lưu bộ từ vựng ({len(idx_to_char)} token): {output_path}")
 
 
 class SMILESDataset(Dataset):
@@ -288,6 +296,9 @@ def parse_arguments() -> argparse.Namespace:
         description="Train a character-level SMILES generator.",
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--data", type=Path, default=CLEAN_DATASET_PATH)
+    parser.add_argument("--vocab-output", type=Path, default=VOCAB_PATH)
+    parser.add_argument("--weights-output", type=Path, default=WEIGHTS_PATH)
     parser.add_argument(
         "--learning-rate",
         type=float,
@@ -307,9 +318,9 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    smiles_list = load_smiles()
+    smiles_list = load_smiles(args.data)
     char_to_idx, idx_to_char = build_vocabulary(smiles_list)
-    save_vocabulary(char_to_idx, idx_to_char)
+    save_vocabulary(char_to_idx, idx_to_char, args.vocab_output)
 
     pad_idx = char_to_idx[PAD_TOKEN]
     training_dataset = SMILESDataset(smiles_list, char_to_idx)
@@ -334,8 +345,9 @@ def main() -> None:
         learning_rate=args.learning_rate,
     )
 
-    torch.save(model.state_dict(), WEIGHTS_PATH)
-    print(f"Đã lưu trọng số mô hình: {WEIGHTS_PATH.name}")
+    args.weights_output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), args.weights_output)
+    print(f"Đã lưu trọng số mô hình: {args.weights_output}")
 
     valid_smiles: List[str] = []
     seen_smiles = set()

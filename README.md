@@ -206,6 +206,15 @@ migration does not retrain or alter them. Candidate Judge v2 and Creator v2
 artifacts are written under ignored `artifacts/` paths and never overwrite the
 baseline files.
 
+The current local clean-master experiment is stored as non-production
+artifacts under `artifacts/judge/clean-master-leakage-v2/` and
+`artifacts/creator/clean-master-char-lstm-v1/`. The Judge candidate has 254
+taxonomy outputs and a BatchNorm MLP, so it is intentionally not loadable by
+the 113-output production adapter. Its manifest and checksums are retained for
+benchmarking and rollback-safe review; do not copy it to
+`odor_predictor_weights.pth` without an audited 113-label snapshot and a
+passing quality gate.
+
 ## API
 
 | Endpoint | Purpose |
