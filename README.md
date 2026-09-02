@@ -101,6 +101,39 @@ flowchart LR
 - Candidate status uses Server-Sent Events; no Redis, Celery, or background job
   system is required.
 
+### Accuracy-first training architecture
+
+The web process never imports DeepChem or Chemprop.  Both the legacy Morgan
+baseline and future graph models implement the same `MoleculePredictor` /
+`PredictionBatch` contract (`olfactory/prediction.py`).  The registered Judge
+v1 remains production until a candidate passes the locked chemical-group test,
+calibration, intensity, and blind-panel gates.
+
+Judge v2 experiments run in a separate environment.  Chemprop is the first
+graph benchmark and `olfactory/training/deepchem_judge.py` is an optional
+DeepChem adapter using `MolGraphConvFeaturizer(use_edges=True,
+use_chirality=True)`.  DeepChem artifacts are immutable candidates under
+`artifacts/judge/<run_id>/`; training never overwrites `odor_predictor_weights.pth`
+and never promotes a registry entry implicitly.  Install it only when needed:
+
+```bash
+python3.11 -m venv .venv-training
+source .venv-training/bin/activate
+python -m pip install -r requirements-deepchem.txt
+```
+
+Create the shared 70/15/15 split once and reuse its checksum for every model:
+
+```bash
+python build_split_manifest.py --legacy-baseline
+python benchmark_baselines.py --legacy-baseline \
+  --split-manifest artifacts/benchmarks/split_manifest.json
+```
+
+Stereo variants are grouped by connectivity InChIKey; cyclic structures are
+grouped by Murcko scaffold and acyclic structures by Butina Morgan similarity.
+Random splits are diagnostic only.  The locked test is never used for tuning.
+
 ## Requirements
 
 - Python `>=3.10,<3.13`
@@ -265,6 +298,10 @@ python benchmark_baselines.py --snapshot /private/path/data-version.parquet
 # Grouped CV for Judge v2
 python benchmark_judge_v2.py --snapshot /private/path/data-version.parquet
 
+# Optional DeepChem graph candidate (training environment only)
+python train_deepchem_judge.py --legacy-baseline \
+  --split-manifest artifacts/benchmarks/split_manifest.json
+
 # Candidate model artifacts; never auto-promoted
 python train_judge_v2.py --snapshot /private/path/data-version.parquet
 python train_creator_v2.py --snapshot /private/path/data-version.parquet \
@@ -306,13 +343,20 @@ including desktop/mobile Playwright and accessibility checks.
 ├── frontend/                 React, Vite, TypeScript, Vitest, Playwright
 ├── olfactory/                FastAPI and molecular application services
 │   ├── data_foundation/      Intake, provenance, SQLite, snapshots
-│   └── training/             Split, metrics, calibration, v2 candidates
+│   ├── rag/                  RAG service boundary and FAISS batch adapters
+│   └── training/             Split, metrics, calibration, Chemprop/DeepChem candidates
 ├── data/                     Taxonomy mapping and source registry metadata
 ├── docs/                     Scientific protocol and research documentation
 ├── tests/                    Python unit and API contract tests
 ├── run_local.sh              One-command local production launcher
 └── model_registry.json       Atomic production model selection
 ```
+
+Academic retrieval is isolated from model training.  The compatibility CLI
+`academic_rag_pipeline.py` delegates through `olfactory/rag/`, stores only
+local FAISS batches, and falls back to an abstract when licensed open-access
+full text is unavailable.  Retrieved academic text is context, never an
+automatic sensory label.
 
 ## Taxonomy and component attribution
 

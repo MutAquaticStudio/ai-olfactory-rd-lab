@@ -46,6 +46,16 @@ by ISO 13299 sensory-profile principles but is not an ISO certification.
 - Report results by source, nearest-training similarity bin and stereo challenge
   subset, including failed and missing cases.
 
+### Architecture and promotion
+
+The production API consumes the `MoleculePredictor` contract and currently
+adapts the frozen Morgan MLP baseline. Chemprop and the optional DeepChem
+chiral graph adapter run only in the Python 3.11–3.12 training environment.
+Each run records the dataset hash, immutable split hash, Git commit, seed,
+calibration artifact, metrics, and weight checksums under `artifacts/`. A model
+is promoted only through an explicit quality-gate decision; registry updates
+are atomic and retain the previous entry for rollback.
+
 ## Creator evaluation
 
 For each target profile, sample 1,000 structures and report RDKit validity,

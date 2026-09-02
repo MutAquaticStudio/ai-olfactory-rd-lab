@@ -187,6 +187,12 @@ export interface PredictionV2 {
     decision_threshold: number | null;
   }>;
   limitations: string[];
+  /** Additive batch-contract fields; v1 consumers continue using the list above. */
+  presence_probability?: number[];
+  expected_intensity?: Array<number | null>;
+  ensemble_uncertainty?: Array<number | null>;
+  training_similarity?: number | null;
+  reliability?: 'IN_DOMAIN' | 'LIMITED_EVIDENCE' | 'OUT_OF_DOMAIN';
 }
 
 export interface AssessmentPayload {

@@ -9,6 +9,7 @@ from .chemistry import (
 from .generation import GenerationEvent, RankedCandidate
 from .pubchem import NoveltyResult, NoveltyStatus
 from .taxonomy import TaxonomyProfile
+from .prediction import EnsemblePredictor, LegacyMorganPredictor, MoleculePredictor, PredictionBatch
 
 __all__ = [
     "ChemicalDecision",
@@ -20,4 +21,8 @@ __all__ = [
     "TaxonomyProfile",
     "ConformerEnsembleResult",
     "ConformerRecord",
+    "PredictionBatch",
+    "MoleculePredictor",
+    "LegacyMorganPredictor",
+    "EnsemblePredictor",
 ]

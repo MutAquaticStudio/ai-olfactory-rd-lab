@@ -20,7 +20,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
       - name: Run test suite
-        run: pytest
+        # Invoke through the selected interpreter so the repository root is
+        # consistently on sys.path across GitHub-hosted Python versions.
+        run: python -m pytest
 
   frontend:
     runs-on: ubuntu-latest
@@ -60,4 +62,4 @@ jobs:
       - name: Verify training stack and deterministic smoke tests
         run: |
           python -c "import chemprop, mlflow, selfies"
-          pytest tests/test_training_foundation.py tests/test_sources.py
+          python -m pytest tests/test_training_foundation.py tests/test_sources.py

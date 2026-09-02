@@ -19,6 +19,7 @@ from olfactory.training.dataset import load_legacy_baseline, load_versioned_snap
 from olfactory.training.metrics import multilabel_metrics
 from olfactory.training.registry import sha256_file
 from olfactory.training.splits import chemical_group_split
+from olfactory.training.benchmark import dataset_fingerprint, load_immutable_manifest, split_from_payload
 
 
 ROOT = Path(__file__).resolve().parent
@@ -38,6 +39,8 @@ def main() -> None:
     parser.add_argument("--dataset-version")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--allow-pre-panel-data", action="store_true")
+    parser.add_argument("--split-manifest", type=Path, default=None,
+                        help="Use an existing immutable split manifest")
     args = parser.parse_args()
     if args.legacy_baseline:
         table = load_legacy_baseline(ROOT / "clean_dataset.csv", ROOT / "odor_morgan_tensor_dataset.pt")
@@ -48,7 +51,11 @@ def main() -> None:
         table = load_versioned_snapshot(args.snapshot, labels, strict_panel_gate=not args.allow_pre_panel_data)
         dataset_version = args.dataset_version or args.snapshot.stem
     features = torch.stack([create_morgan_tensor(Chem.MolFromSmiles(value)) for value in table.smiles]).float()
-    split = chemical_group_split(table.smiles, np.nan_to_num(table.presence, nan=0.0), seed=args.seed)
+    if args.split_manifest:
+        payload = load_immutable_manifest(args.split_manifest, table=table)
+        split = split_from_payload(payload)
+    else:
+        split = chemical_group_split(table.smiles, np.nan_to_num(table.presence, nan=0.0), seed=args.seed)
     train, validation, test = map(list, (split.train_indices, split.validation_indices, split.test_indices))
 
     logistic_validation, estimators = fit_ovr_logistic(features[train].numpy(), table.presence[train], features[validation].numpy())
@@ -73,6 +80,8 @@ def main() -> None:
         "model_family": "judge-baseline-ladder",
         "dataset_version": dataset_version,
         "split_hash": split.split_hash,
+        "split_manifest": str(args.split_manifest) if args.split_manifest else None,
+        "dataset_sha256": dataset_fingerprint(table),
         "seed": args.seed,
         "features": {"radius": 2, "bits": 2048, "use_chirality": True},
         "logistic": {"metrics": logistic_metrics, "label_models": len(estimators)},
