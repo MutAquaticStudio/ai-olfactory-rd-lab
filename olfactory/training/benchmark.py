@@ -148,8 +148,8 @@ def assert_no_leakage(payload: Mapping[str, object]) -> None:
     if any(int(index) < 0 or int(index) >= len(group_ids) for index in all_indices):
         raise ValueError("Benchmark manifest group_ids do not cover all indices")
     split_by_group: Dict[str, int] = {}
-    for split_number, indices in enumerate(payload["train_indices"], 0):
-        split_by_group[str(group_ids[indices])] = split_number
+    for index in payload["train_indices"]:
+        split_by_group[str(group_ids[index])] = 0
     for split_number, key in ((1, "validation_indices"), (2, "test_indices")):
         for index in payload[key]:
             group = str(group_ids[index])

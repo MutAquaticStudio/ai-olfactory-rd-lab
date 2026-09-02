@@ -63,6 +63,27 @@ def test_ensemble_reports_mean_and_epistemic_spread():
     assert result.ensemble_uncertainty[0, 0] == pytest.approx(0.3)
 
 
+def test_ensemble_rejects_mixed_dataset_or_calibration_provenance():
+    class Stub:
+        label_names = tuple(f"label-{i}" for i in range(113))
+
+        def __init__(self, dataset, calibration):
+            self.dataset = dataset
+            self.calibration = calibration
+
+        def predict(self, smiles):
+            matrix = np.full((len(smiles), 113), 0.5, dtype=np.float32)
+            return PredictionBatch(
+                "stub", self.dataset, self.calibration, matrix,
+                np.full_like(matrix, np.nan), np.full_like(matrix, np.nan),
+                np.full((len(smiles),), 0.8), ("IN_DOMAIN",) * len(smiles),
+                self.label_names,
+            )
+
+    with pytest.raises(ValueError, match="provenance"):
+        EnsemblePredictor([Stub("data-a", "cal"), Stub("data-b", "cal")]).predict(["CCO"])
+
+
 def test_deepchem_graph_model_has_dual_113_heads_without_importing_deepchem():
     graph = SimpleNamespace(
         node_features=np.ones((3, 4), dtype=np.float32),
@@ -89,6 +110,17 @@ def test_split_manifest_is_immutable_and_validated(tmp_path):
     with pytest.raises(FileExistsError):
         save_immutable_manifest(path, {**payload, "dataset_version": "different"})
     assert_no_leakage(payload)
+
+
+def test_split_manifest_rejects_group_leakage():
+    payload = {
+        "train_indices": [0, 1],
+        "validation_indices": [2],
+        "test_indices": [3],
+        "group_ids": ["g0", "g1", "g1", "g2"],
+    }
+    with pytest.raises(ValueError, match="leakage"):
+        assert_no_leakage(payload)
 
 
 def test_registry_requires_a_passing_quality_gate(tmp_path):

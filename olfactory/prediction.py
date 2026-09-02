@@ -188,6 +188,14 @@ class EnsemblePredictor:
 
     def predict(self, isomeric_smiles: Sequence[str]) -> PredictionBatch:
         batches = [predictor.predict(isomeric_smiles) for predictor in self.predictors]
+        provenance = {
+            (batch.dataset_version, batch.calibration_version)
+            for batch in batches
+        }
+        if len(provenance) != 1:
+            raise ValueError(
+                "All ensemble members must share dataset and calibration provenance"
+            )
         values = np.stack([batch.presence_probability for batch in batches], axis=0)
         intensities = np.stack([batch.expected_intensity for batch in batches], axis=0)
         similarities = np.stack([batch.training_similarity for batch in batches], axis=0)

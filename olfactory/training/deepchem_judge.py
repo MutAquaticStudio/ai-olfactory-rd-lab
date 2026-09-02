@@ -196,6 +196,7 @@ class DeepChemJudgePredictor:
     featurizer: Any
     label_names: Tuple[str, ...]
     identity: PredictionIdentity
+    calibration: Optional[CalibrationBundle] = None
 
     @classmethod
     def from_artifact(cls, run_dir: Path) -> "DeepChemJudgePredictor":
@@ -211,6 +212,8 @@ class DeepChemJudgePredictor:
         model = DeepChemGraphJudge(int(weights["node_features"]), int(weights["edge_features"]), len(labels))
         model.load_state_dict(weights["state_dict"])
         model.eval()
+        calibration_path = root / "calibration.json"
+        calibration = CalibrationBundle.load(calibration_path) if calibration_path.exists() else None
         return cls(
             model=model,
             featurizer=make_deepchem_featurizer(),
@@ -221,6 +224,7 @@ class DeepChemJudgePredictor:
                 calibration_version=str(manifest.get("calibration_version", "uncalibrated")),
                 model_status=str(manifest.get("status", "CANDIDATE")),
             ),
+            calibration=calibration,
         )
 
     def predict(self, isomeric_smiles: Sequence[str]) -> PredictionBatch:
@@ -228,7 +232,12 @@ class DeepChemJudgePredictor:
         self.model.eval()
         with torch.inference_mode():
             logits, intensity = self.model(graphs)
-            probabilities = torch.sigmoid(logits).cpu().numpy()
+            raw_logits = logits.cpu().numpy()
+            probabilities = (
+                self.calibration.transform_logits(raw_logits)
+                if self.calibration is not None
+                else torch.sigmoid(logits).cpu().numpy()
+            )
             values = intensity.cpu().numpy()
         shape = probabilities.shape
         return PredictionBatch(
