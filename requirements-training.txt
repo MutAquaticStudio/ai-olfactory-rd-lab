@@ -1,4 +1,7 @@
 # Training environment: Python >=3.11,<3.13 (Chemprop v2 requires Python >=3.11).
+# Install requirements-deepchem.txt instead when running the optional graph
+# adapter; keeping DeepChem out of the app environment avoids its NumPy/Torch
+# pins affecting FastAPI inference.
 -r requirements-dev.txt
 chemprop>=2.3.1,<3.0
 mlflow>=3.0,<4.0

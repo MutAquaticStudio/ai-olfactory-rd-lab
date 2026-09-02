@@ -38,7 +38,19 @@ class ModelRegistry:
         artifact = Path(str(entry["weights_path"]))
         if not artifact.is_absolute() and root is not None:
             artifact = root / artifact
-        return artifact.exists() and sha256_file(artifact) == entry.get("weights_sha256")
+        if not artifact.exists() or sha256_file(artifact) != entry.get("weights_sha256"):
+            return False
+        # Candidate manifests may include an additional calibration checksum;
+        # production v1 entries remain valid without it.
+        calibration_path = entry.get("calibration_path")
+        calibration_sha = entry.get("calibration_sha256")
+        if calibration_path and calibration_sha:
+            calibration = Path(str(calibration_path))
+            if not calibration.is_absolute() and root is not None:
+                calibration = root / calibration
+            if not calibration.exists() or sha256_file(calibration) != calibration_sha:
+                return False
+        return True
 
     def promote(self, family: str, entry: Dict[str, object]) -> Dict[str, object]:
         payload = self.read()
@@ -57,3 +69,45 @@ class ModelRegistry:
             temporary_path = Path(temporary.name)
         os.replace(temporary_path, self.path)
         return payload
+
+    def promote_after_gate(
+        self,
+        family: str,
+        entry: Dict[str, object],
+        decision: object,
+    ) -> Dict[str, object]:
+        """Promote only an artifact whose explicit scientific gate passed."""
+        if not bool(getattr(decision, "eligible", False)):
+            reasons = getattr(decision, "blocked_reasons", ())
+            raise ValueError(f"Model promotion blocked by quality gate: {', '.join(map(str, reasons))}")
+        if not self.verify_entry(entry, self.path.parent):
+            raise ValueError("Cannot promote an artifact with an invalid weights checksum")
+        promoted = dict(entry)
+        promoted["status"] = "PRODUCTION"
+        promoted["promoted_after_gate"] = True
+        return self.promote(family, promoted)
+
+
+def verify_artifact_manifest(manifest: Dict[str, object], root: Optional[Path] = None) -> bool:
+    """Verify all checksummed files referenced by a candidate artifact."""
+    base = Path(root) if root is not None else None
+    files = manifest.get("checksums", {})
+    if isinstance(files, dict):
+        for raw_path, expected in files.items():
+            path = Path(str(raw_path))
+            if not path.is_absolute() and base is not None:
+                path = base / path
+            if not path.exists() or sha256_file(path) != expected:
+                return False
+    weights = manifest.get("weights_path")
+    checksum = manifest.get("weights_sha256")
+    if weights and checksum:
+        path = Path(str(weights))
+        if not path.is_absolute() and base is not None:
+            path = base / path
+        if not path.exists() or sha256_file(path) != checksum:
+            return False
+    return True
+
+
+__all__ = ["ModelRegistry", "sha256_file", "verify_artifact_manifest"]

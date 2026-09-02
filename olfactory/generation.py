@@ -543,7 +543,7 @@ def generate_candidate_pool(
 
 
 def rank_candidates(
-    judge_model: OdorPredictor,
+    judge_model: object,
     label_names: Sequence[str],
     target_descriptors: Sequence[str],
     candidates: Sequence[ScreenedCandidate],
@@ -570,10 +570,17 @@ def rank_candidates(
         raise ValueError(f"Unknown target descriptors: {', '.join(missing)}")
     target_indices = [label_to_index[label] for label in target_descriptors]
     excluded = set(target_indices)
-    probability_matrix = predict_probabilities(
-        judge_model,
-        [candidate.molecule for candidate in eligible],
-    )
+    if hasattr(judge_model, "predict"):
+        # Common MoleculePredictor seam; legacy model objects still use the
+        # original feature helper for one-release backwards compatibility.
+        smiles = [candidate.isomeric_smiles for candidate in eligible]
+        prediction = judge_model.predict(smiles)
+        probability_matrix = torch.from_numpy(prediction.presence_probability)
+    else:
+        probability_matrix = predict_probabilities(
+            judge_model,  # type: ignore[arg-type]
+            [candidate.molecule for candidate in eligible],
+        )
     ranked: List[RankedCandidate] = []
     for candidate, probabilities in zip(eligible, probability_matrix):
         ranked.append(

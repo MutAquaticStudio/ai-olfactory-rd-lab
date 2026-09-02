@@ -14,6 +14,7 @@ import torch
 from olfactory.training.dataset import load_legacy_baseline, load_versioned_snapshot
 from olfactory.training.judge_v2 import train_judge_v2
 from olfactory.training.splits import SplitManifest, chemical_group_folds, chemical_group_split
+from olfactory.training.benchmark import load_immutable_manifest, split_from_payload
 
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +33,8 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--intensity-weight", type=float, choices=(0.1, 0.3, 1.0), default=0.3)
     parser.add_argument("--allow-pre-panel-data", action="store_true")
+    parser.add_argument("--split-manifest", type=Path, default=None,
+                        help="Use an existing immutable split manifest")
     return parser.parse_args()
 
 
@@ -66,7 +69,10 @@ def main() -> None:
         table = load_versioned_snapshot(args.snapshot, labels, strict_panel_gate=not args.allow_pre_panel_data)
         dataset_version = args.dataset_version or args.snapshot.stem
     target_matrix = np.nan_to_num(table.presence, nan=0.0)
-    locked = chemical_group_split(table.smiles, target_matrix, seed=42)
+    if args.split_manifest:
+        locked = split_from_payload(load_immutable_manifest(args.split_manifest, table=table))
+    else:
+        locked = chemical_group_split(table.smiles, target_matrix, seed=42)
     development = [*locked.train_indices, *locked.validation_indices]
     folds = chemical_group_folds(
         [table.smiles[index] for index in development],

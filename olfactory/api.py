@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Generator, List, Optional, Sequence, Set, Tuple
 
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -37,7 +38,7 @@ from .data_foundation import DataFoundationService
 from .features import (
     create_morgan_tensor,
     geometric_mean,
-    predict_probabilities,
+    predict_probabilities,  # kept as a compatibility seam for v0.5 tests/extensions
     smiles_representations,
     top_descriptors,
 )
@@ -46,6 +47,7 @@ from .prediction_integrity import (
     legacy_prediction_payload,
     nearest_training_similarity,
 )
+from .prediction import LegacyMorganPredictor, MoleculePredictor
 from .generation import (
     GenerationEvent,
     GenerationResult,
@@ -162,10 +164,18 @@ class AppResources:
     odor_lock: threading.Lock = field(default_factory=threading.Lock)
     creator_lock: threading.Lock = field(default_factory=threading.Lock)
     data_service: Optional[DataFoundationService] = None
+    predictor: Optional[MoleculePredictor] = None
 
     def __post_init__(self) -> None:
         if self.reference_verifier is None:
             self.reference_verifier = build_reference_verifier(self.pubchem_client)
+        if self.predictor is None:
+            self.predictor = LegacyMorganPredictor(
+                self.odor_model,
+                self.label_names,
+                identity=self.judge_identity,
+                training_fingerprints=self.training_fingerprints,
+            )
 
 
 def load_app_resources() -> AppResources:
@@ -354,7 +364,10 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
         return response
 
     with resources.odor_lock:
-        probabilities = predict_probabilities(resources.odor_model, [molecule])[0]
+        if resources.predictor is None:
+            raise RuntimeError("Molecule predictor is unavailable")
+        prediction_batch = resources.predictor.predict([isomeric_smiles])
+        probabilities = torch.from_numpy(prediction_batch.presence_probability[0])
     probability_values = [float(value) for value in probabilities.tolist()]
     similarity = nearest_training_similarity(
         create_morgan_tensor(molecule),
@@ -362,6 +375,41 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
     )
     profile = project_probabilities(probability_values, resources.label_names)
     ensemble = build_conformer_ensemble(isomeric_smiles)
+    prediction_identity = resources.judge_identity
+    prediction_similarity = similarity
+    if prediction_batch is not None:
+        prediction_identity = PredictionIdentity(
+            model_version=prediction_batch.model_version,
+            dataset_version=prediction_batch.dataset_version,
+            calibration_version=prediction_batch.calibration_version,
+            model_status=resources.judge_identity.model_status,
+        )
+        if prediction_batch.training_similarity.size and np.isfinite(
+            prediction_batch.training_similarity[0]
+        ):
+            prediction_similarity = float(prediction_batch.training_similarity[0])
+    prediction_payload = legacy_prediction_payload(
+        probability_values,
+        resources.label_names,
+        prediction_identity,
+        prediction_similarity,
+    )
+    # Keep the v1 list unchanged while exposing the v2 contract additively.
+    prediction_payload.update(
+        {
+            "presence_probability": probability_values,
+            "expected_intensity": [
+                None if not np.isfinite(value) else float(value)
+                for value in prediction_batch.expected_intensity[0]
+            ],
+            "ensemble_uncertainty": [
+                None if not np.isfinite(value) else float(value)
+                for value in prediction_batch.ensemble_uncertainty[0]
+            ],
+            "training_similarity": prediction_payload["nearest_training_similarity"],
+            "reliability": prediction_payload["reliability_state"],
+        }
+    )
     response.update(
         {
             "analysis_state": "COMPLETE",
@@ -385,12 +433,7 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
                     )
                 ],
             },
-            "prediction_v2": legacy_prediction_payload(
-                probability_values,
-                resources.label_names,
-                resources.judge_identity,
-                similarity,
-            ),
+            "prediction_v2": prediction_payload,
         }
     )
     return response
@@ -472,7 +515,7 @@ def _completion_payload(
 ) -> Dict[str, object]:
     with resources.odor_lock:
         ranked = rank_candidates(
-            resources.odor_model,
+            resources.predictor,
             resources.label_names,
             targets,
             result.accepted_candidates,
@@ -638,6 +681,27 @@ def create_app(
                 "available": current.data_service is not None,
                 "label_semantics": ["PRESENT", "ABSENT", "UNASSESSED"],
                 "intensity_scale": [0, 10],
+            },
+            "prediction_contract": {
+                "name": "PredictionBatch",
+                "version": "2",
+                "fields": [
+                    "model_version",
+                    "dataset_version",
+                    "calibration_version",
+                    "presence_probability",
+                    "expected_intensity",
+                    "ensemble_uncertainty",
+                    "training_similarity",
+                    "reliability_state",
+                ],
+                "production_adapter": type(current.predictor).__name__ if current.predictor else None,
+            },
+            "training": {
+                "primary_python": "3.11",
+                "compatibility_python": ["3.10", "3.12"],
+                "deepchem_training_only": True,
+                "promotion_requires_quality_gate": True,
             },
             "reference_verification": {
                 "providers": [
@@ -821,7 +885,14 @@ def create_app(
 
         def locked_variant_scorer(molecules):
             with current.odor_lock:
-                matrix = predict_probabilities(current.odor_model, molecules)
+                if current.predictor is None:
+                    raise RuntimeError("Molecule predictor is unavailable")
+                variant_smiles = [
+                    Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+                    for molecule in molecules
+                ]
+                prediction = current.predictor.predict(variant_smiles)
+                matrix = torch.from_numpy(prediction.presence_probability)
             return [
                 geometric_mean(probabilities[target_indices])
                 for probabilities in matrix

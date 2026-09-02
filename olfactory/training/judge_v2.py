@@ -21,6 +21,7 @@ from ..features import create_morgan_tensor
 from .calibration import CalibrationBundle
 from .dataset import MolecularTargetTable
 from .metrics import intensity_metrics, multilabel_metrics
+from .benchmark import dataset_fingerprint
 from .registry import sha256_file
 from .splits import SplitManifest
 from .tracking import log_manifest_to_mlflow
@@ -346,12 +347,32 @@ def train_judge_v2(
         },
         weights_path,
     )
+    config_path = run_dir / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "architecture": JUDGE_V2_ARCHITECTURE,
+                "seed": seed,
+                "intensity_weight": intensity_weight,
+                "max_epochs": max_epochs,
+                "patience": patience,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    split_path = run_dir / "split.json"
+    split_path.write_text(json.dumps(split.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    metrics_path = run_dir / "metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
     root = Path(__file__).resolve().parents[2]
     manifest = {
         "run_id": run_id,
         "model_version": run_id,
         "architecture": JUDGE_V2_ARCHITECTURE,
         "dataset_version": dataset_version,
+        "dataset_sha256": dataset_fingerprint(table),
         "split_hash": split.split_hash,
         "seed": seed,
         "intensity_weight": intensity_weight,
@@ -361,6 +382,13 @@ def train_judge_v2(
         "weights_sha256": sha256_file(weights_path),
         "calibration_path": str(calibration_path),
         "calibration_sha256": sha256_file(calibration_path),
+        "config_path": str(config_path),
+        "split_path": str(split_path),
+        "metrics_path": str(metrics_path),
+        "checksums": {
+            str(path.name): sha256_file(path)
+            for path in (weights_path, calibration_path, config_path, split_path, metrics_path)
+        },
         "metrics": metrics,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "CANDIDATE",
