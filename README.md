@@ -1,5 +1,7 @@
 # Scent Molecule Studio
 
+**English** | [Tiếng Việt](README_VI.md)
+
 Structure analysis and candidate design for fragrance R&D.
 
 [![CI](https://github.com/MutAquaticStudio/ai-olfactory-rd-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/MutAquaticStudio/ai-olfactory-rd-lab/actions/workflows/tests.yml)
@@ -235,6 +237,27 @@ taxonomy outputs and a BatchNorm MLP, so it is intentionally not loadable by
 the 113-output production adapter. Its manifest and checksums are retained for
 benchmarking and rollback-safe review; do not copy it into the private bundle
 without an audited 113-label snapshot and a passing quality gate.
+
+### Clean-master candidate learning curve
+
+The chart below is from the leakage-resistant
+`judge-clean-master-leakage-v2-20260902` candidate run. Connectivity variants
+remain in one partition; cyclic molecules are grouped by Murcko scaffold and
+acyclic molecules by Butina similarity. The fixed split contains 2,781 training,
+472 calibration, 697 validation, and 779 locked-test rows.
+
+![Judge clean-master leakage-resistant learning curve](docs/assets/judge-clean-master-leakage-v2-learning-curve.png)
+
+| Recorded metric | Result |
+|---|---:|
+| Best validation BCE loss | `0.1405` at epoch 24 |
+| Best validation micro F1 | `0.4445` at epoch 28 |
+| Locked-test BCE loss | `0.1459` |
+| Locked-test micro F1, fixed threshold | `0.4266` |
+
+These values describe a 254-label weak-taxonomy candidate, not the registered
+113-label production model. They are retained as reproducible training evidence
+and do not satisfy the promotion gate by themselves.
 
 ## API
 
