@@ -1,5 +1,6 @@
 import type {
   AnalysisResult,
+  AcademicEvidenceSummary,
   AssessmentPayload,
   AppMeta,
   DatasetVersion,
@@ -50,6 +51,21 @@ export async function analyzeMolecule(smiles: string, signal?: AbortSignal): Pro
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ smiles }),
+    signal
+  });
+  if (!response.ok) throw await parseError(response);
+  return response.json();
+}
+
+export async function queryAcademicEvidence(
+  isomericSmiles: string,
+  includeAbstracts = false,
+  signal?: AbortSignal
+): Promise<AcademicEvidenceSummary> {
+  const response = await fetch('/api/v1/academic/evidence/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ isomeric_smiles: isomericSmiles, include_abstracts: includeAbstracts }),
     signal
   });
   if (!response.ok) throw await parseError(response);

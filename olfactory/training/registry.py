@@ -34,20 +34,60 @@ class ModelRegistry:
         entry = self.read().get("production", {}).get(family)
         return dict(entry) if entry else None
 
-    def verify_entry(self, entry: Dict[str, object], root: Optional[Path] = None) -> bool:
+    def verify_entry(
+        self,
+        entry: Dict[str, object],
+        root: Optional[Path] = None,
+        *,
+        require_within_root: bool = False,
+    ) -> bool:
         artifact = Path(str(entry["weights_path"]))
-        if not artifact.is_absolute() and root is not None:
-            artifact = root / artifact
+        if root is not None:
+            root = root.resolve()
+            if artifact.is_absolute():
+                artifact = artifact.resolve()
+            else:
+                artifact = (root / artifact).resolve()
+            if require_within_root and not artifact.is_relative_to(root):
+                return False
         if not artifact.exists() or sha256_file(artifact) != entry.get("weights_sha256"):
             return False
+
+        # A bundle manifest is generated from whatever files an operator copies
+        # into the private resource directory, so its checksum alone is not a
+        # trust anchor.  When the production registry declares a runtime dataset,
+        # verify that artifact against the registry checksum before deserializing
+        # it.  ``dataset_sha256`` remains metadata-only for entries (for example,
+        # Creator v1) that do not declare ``dataset_path``.
+        dataset_path = entry.get("dataset_path")
+        dataset_sha = entry.get("dataset_sha256")
+        if dataset_path:
+            if not dataset_sha:
+                return False
+            dataset = Path(str(dataset_path))
+            if root is not None:
+                if dataset.is_absolute():
+                    dataset = dataset.resolve()
+                else:
+                    dataset = (root / dataset).resolve()
+                if require_within_root and not dataset.is_relative_to(root):
+                    return False
+            if not dataset.exists() or sha256_file(dataset) != dataset_sha:
+                return False
+
         # Candidate manifests may include an additional calibration checksum;
         # production v1 entries remain valid without it.
         calibration_path = entry.get("calibration_path")
         calibration_sha = entry.get("calibration_sha256")
         if calibration_path and calibration_sha:
             calibration = Path(str(calibration_path))
-            if not calibration.is_absolute() and root is not None:
-                calibration = root / calibration
+            if root is not None:
+                if calibration.is_absolute():
+                    calibration = calibration.resolve()
+                else:
+                    calibration = (root / calibration).resolve()
+                if require_within_root and not calibration.is_relative_to(root):
+                    return False
             if not calibration.exists() or sha256_file(calibration) != calibration_sha:
                 return False
         return True

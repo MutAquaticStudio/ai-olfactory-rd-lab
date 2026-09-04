@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Dict, Sequence, Set, Tuple
 
@@ -16,6 +18,87 @@ from .models import ODOR_LABEL_COUNT, OdorPredictor, SMILES_LSTM, select_device
 
 PAD_TOKEN = "<PAD>"
 END_TOKEN = "<END>"
+RESOURCE_DIR_ENV = "SCENT_STUDIO_RESOURCE_DIR"
+RESOURCE_MANIFEST_NAME = "resource_manifest.json"
+PRIVATE_RESOURCE_FILES = (
+    "odor_morgan_tensor_dataset.pt",
+    "odor_predictor_weights.pth",
+    "smiles_creator_weights.pth",
+)
+
+
+class ResourceBundleError(RuntimeError):
+    """Stable, user-safe error raised when private model resources are invalid."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+def default_resource_dir() -> Path:
+    configured = os.environ.get(RESOURCE_DIR_ENV)
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.home() / ".scent-molecule-studio" / "resources").resolve()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_resource_bundle(resource_dir: Path | str | None = None) -> Path:
+    """Validate the private model bundle and return its resolved directory."""
+
+    root = Path(resource_dir or default_resource_dir()).expanduser().resolve()
+    manifest_path = root / RESOURCE_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise ResourceBundleError(
+            "RESOURCE_BUNDLE_MISSING",
+            f"Private resource manifest is missing: {manifest_path}",
+        )
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ResourceBundleError(
+            "RESOURCE_MANIFEST_INVALID",
+            f"Private resource manifest cannot be read: {manifest_path}",
+        ) from error
+
+    if payload.get("schema_version") != 1:
+        raise ResourceBundleError(
+            "RESOURCE_MANIFEST_INVALID",
+            "Private resource manifest has an unsupported schema version.",
+        )
+
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        raise ResourceBundleError(
+            "RESOURCE_MANIFEST_INVALID",
+            "Private resource manifest must contain a files mapping.",
+        )
+    for name in PRIVATE_RESOURCE_FILES:
+        expected = files.get(name)
+        if not isinstance(expected, str) or not expected:
+            raise ResourceBundleError(
+                "RESOURCE_MANIFEST_INVALID",
+                f"Private resource manifest has no checksum for {name}.",
+            )
+        path = (root / name).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise ResourceBundleError(
+                "RESOURCE_FILE_MISSING",
+                f"Private resource file is missing: {path}",
+            )
+        if _sha256_file(path) != expected.lower():
+            raise ResourceBundleError(
+                "RESOURCE_CHECKSUM_MISMATCH",
+                f"Private resource checksum mismatch: {name}",
+            )
+    return root
 
 
 def load_odor_model(

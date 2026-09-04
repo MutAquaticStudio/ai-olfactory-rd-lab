@@ -20,6 +20,11 @@ from pydantic import BaseModel, Field
 from rdkit import Chem, rdBase
 import torch
 
+from .academic_evidence import (
+    ACADEMIC_EVIDENCE_SCHEMA_VERSION,
+    AcademicEvidenceService,
+    AcademicEvidenceStore,
+)
 from .chemistry import (
     CONFORMER_CACHE_SIZE,
     MACROCYCLE_CLUSTER_RMSD,
@@ -68,10 +73,13 @@ from .references import (
     build_reference_verifier,
 )
 from .resources import (
+    ResourceBundleError,
+    default_resource_dir,
     load_existing_isomeric_smiles_set,
     load_odor_model,
     load_smiles_model,
     load_training_fingerprints,
+    validate_resource_bundle,
 )
 from .taxonomy import TaxonomyProfile, load_mapping, project_probabilities
 from .stereo import enumerate_stereo_options
@@ -80,12 +88,19 @@ from .training.registry import ModelRegistry
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FRONTEND_DIST = APP_ROOT / "frontend" / "dist"
-DATASET_PATH = APP_ROOT / "odor_morgan_tensor_dataset.pt"
-ODOR_WEIGHTS_PATH = APP_ROOT / "odor_predictor_weights.pth"
-CREATOR_WEIGHTS_PATH = APP_ROOT / "smiles_creator_weights.pth"
+RESOURCE_DIR = default_resource_dir()
+DATASET_PATH = RESOURCE_DIR / "odor_morgan_tensor_dataset.pt"
+ODOR_WEIGHTS_PATH = RESOURCE_DIR / "odor_predictor_weights.pth"
+CREATOR_WEIGHTS_PATH = RESOURCE_DIR / "smiles_creator_weights.pth"
 VOCAB_PATH = APP_ROOT / "smiles_vocab.json"
 REFERENCE_PATH = APP_ROOT / "clean_dataset.csv"
 MODEL_REGISTRY_PATH = APP_ROOT / "model_registry.json"
+ACADEMIC_EVIDENCE_PATH = Path(
+    os.environ.get(
+        "SCENT_STUDIO_ACADEMIC_EVIDENCE_PATH",
+        str(APP_ROOT / "faiss_academic_index" / "academic_evidence.jsonl"),
+    )
+).expanduser()
 
 REQUIRED_CANDIDATES = 5
 SHORTLIST_COUNT = 3
@@ -141,6 +156,11 @@ class AssessmentRequest(BaseModel):
     supersedes_assessment_id: Optional[str] = Field(default=None, max_length=120)
 
 
+class AcademicEvidenceQuery(BaseModel):
+    isomeric_smiles: str = Field(min_length=1, max_length=4096)
+    include_abstracts: bool = False
+
+
 @dataclass
 class AppResources:
     odor_model: OdorPredictor
@@ -165,6 +185,7 @@ class AppResources:
     creator_lock: threading.Lock = field(default_factory=threading.Lock)
     data_service: Optional[DataFoundationService] = None
     predictor: Optional[MoleculePredictor] = None
+    academic_evidence_service: Optional[AcademicEvidenceService] = None
 
     def __post_init__(self) -> None:
         if self.reference_verifier is None:
@@ -176,19 +197,42 @@ class AppResources:
                 identity=self.judge_identity,
                 training_fingerprints=self.training_fingerprints,
             )
+        if self.academic_evidence_service is None:
+            # Ingest writes derived evidence next to the local FAISS batches.
+            # Keep the API pointed at that same path while allowing an explicit
+            # environment override for a reviewed evidence store.
+            self.academic_evidence_service = AcademicEvidenceService(
+                AcademicEvidenceStore(ACADEMIC_EVIDENCE_PATH)
+            )
 
 
 def load_app_resources() -> AppResources:
+    resource_dir = validate_resource_bundle()
     registry = ModelRegistry(MODEL_REGISTRY_PATH)
     judge_entry = registry.production("judge") or {}
     creator_entry = registry.production("creator") or {}
-    if judge_entry and not registry.verify_entry(judge_entry, APP_ROOT):
-        raise ValueError("Judge registry checksum verification failed")
-    if creator_entry and not registry.verify_entry(creator_entry, APP_ROOT):
-        raise ValueError("Creator registry checksum verification failed")
-    judge_weights = APP_ROOT / str(judge_entry.get("weights_path", ODOR_WEIGHTS_PATH.name))
-    creator_weights = APP_ROOT / str(creator_entry.get("weights_path", CREATOR_WEIGHTS_PATH.name))
-    odor_model, label_names = load_odor_model(DATASET_PATH, judge_weights)
+    if judge_entry and not registry.verify_entry(
+        judge_entry,
+        resource_dir,
+        require_within_root=True,
+    ):
+        raise ResourceBundleError(
+            "MODEL_CHECKSUM_MISMATCH",
+            "Judge resource checksum verification failed.",
+        )
+    if creator_entry and not registry.verify_entry(
+        creator_entry,
+        resource_dir,
+        require_within_root=True,
+    ):
+        raise ResourceBundleError(
+            "MODEL_CHECKSUM_MISMATCH",
+            "Creator resource checksum verification failed.",
+        )
+    dataset_path = resource_dir / DATASET_PATH.name
+    judge_weights = resource_dir / str(judge_entry.get("weights_path", ODOR_WEIGHTS_PATH.name))
+    creator_weights = resource_dir / str(creator_entry.get("weights_path", CREATOR_WEIGHTS_PATH.name))
+    odor_model, label_names = load_odor_model(dataset_path, judge_weights)
     creator_model, char_to_idx, idx_to_char = load_smiles_model(
         VOCAB_PATH,
         creator_weights,
@@ -211,7 +255,7 @@ def load_app_resources() -> AppResources:
                 Path(scentree_manifest).expanduser() if scentree_manifest else None
             ),
         ),
-        training_fingerprints=load_training_fingerprints(DATASET_PATH),
+        training_fingerprints=load_training_fingerprints(dataset_path),
         judge_identity=PredictionIdentity(
             model_version=str(judge_entry.get("model_version", "judge-v1-legacy")),
             dataset_version=str(judge_entry.get("dataset_version", "legacy-clean-3522")),
@@ -304,6 +348,21 @@ def _reference_gate_payload(gate: Optional[ReferenceGate]) -> Dict[str, object]:
     }
 
 
+def _academic_evidence_payload(summary: object) -> Dict[str, object]:
+    """Serialize local evidence without exposing implementation details."""
+    to_dict = getattr(summary, "to_dict", None)
+    if to_dict is None:
+        return {
+            "status": "NO_EXACT_EVIDENCE",
+            "query_isomeric_smiles": None,
+            "normalized_structure": None,
+            "matches": [],
+            "conflicts": [],
+            "provenance": [],
+        }
+    return to_dict()
+
+
 def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object]:
     normalized = raw_smiles.strip()
     with rdBase.BlockLogs():
@@ -335,6 +394,7 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
         # Analysis never transmits identifiers without a dedicated consent flow.
         "reference_checks": [],
         "reference_gate": _reference_gate_payload(None),
+        "academic_evidence": None,
     }
 
     resolution = enumerate_stereo_options(molecule, limit=ANALYSIS_STEREO_LIMIT)
@@ -436,6 +496,12 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
             "prediction_v2": prediction_payload,
         }
     )
+    if resources.academic_evidence_service is not None:
+        academic_summary = resources.academic_evidence_service.verify(
+            isomeric_smiles,
+            include_abstracts=False,
+        )
+        response["academic_evidence"] = _academic_evidence_payload(academic_summary)
     return response
 
 
@@ -607,7 +673,7 @@ def create_app(
                 application.state.resource_error = None
             except Exception as error:
                 application.state.resources = None
-                application.state.resource_error = type(error).__name__
+                application.state.resource_error = getattr(error, "code", type(error).__name__)
         yield
 
     application = FastAPI(
@@ -681,6 +747,15 @@ def create_app(
                 "available": current.data_service is not None,
                 "label_semantics": ["PRESENT", "ABSENT", "UNASSESSED"],
                 "intensity_scale": [0, 10],
+            },
+            "academic_evidence": {
+                "available": current.academic_evidence_service is not None,
+                "schema_version": ACADEMIC_EVIDENCE_SCHEMA_VERSION,
+                "default_content_type": "full_text",
+                "abstracts_opt_in": True,
+                "training_auto_import": False,
+                "identity_policy": "EXACT_STEREO_WITH_PROVENANCE",
+                "safety_policy": "COMPUTATIONAL_TRIAGE_ONLY",
             },
             "prediction_contract": {
                 "name": "PredictionBatch",
@@ -824,6 +899,75 @@ def create_app(
     @application.get("/api/v1/datasets/versions")
     async def dataset_versions(request: Request):
         return {"versions": await asyncio.to_thread(_data_service(request).list_snapshots)}
+
+    @application.post("/api/v1/academic/evidence/query")
+    async def academic_evidence_query(
+        payload: AcademicEvidenceQuery,
+        request: Request,
+    ):
+        current = _resources(request)
+        service = current.academic_evidence_service
+        if service is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "ACADEMIC_EVIDENCE_UNAVAILABLE",
+                    "message": "Academic evidence is currently unavailable.",
+                },
+            )
+        try:
+            summary = await asyncio.to_thread(
+                service.verify,
+                payload.isomeric_smiles,
+                include_abstracts=payload.include_abstracts,
+            )
+            return _academic_evidence_payload(summary)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INVALID_STRUCTURE_IDENTIFIER",
+                    "message": "The structure could not be verified.",
+                    "technical_details": str(error),
+                },
+            ) from error
+
+    @application.get("/api/v1/academic/evidence/{evidence_id}")
+    async def academic_evidence_detail(evidence_id: str, request: Request):
+        current = _resources(request)
+        service = current.academic_evidence_service
+        if service is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "ACADEMIC_EVIDENCE_UNAVAILABLE",
+                    "message": "Academic evidence is currently unavailable.",
+                },
+            )
+        evidence = await asyncio.to_thread(service.get, evidence_id)
+        if evidence is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "ACADEMIC_EVIDENCE_NOT_FOUND",
+                    "message": "The academic evidence record was not found.",
+                },
+            )
+        return evidence.to_dict()
+
+    @application.get("/api/v1/academic/sources")
+    async def academic_sources(request: Request):
+        current = _resources(request)
+        service = current.academic_evidence_service
+        if service is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "ACADEMIC_EVIDENCE_UNAVAILABLE",
+                    "message": "Academic evidence is currently unavailable.",
+                },
+            )
+        return {"sources": await asyncio.to_thread(service.sources)}
 
     @application.post("/api/v1/analysis")
     async def analysis(payload: AnalysisRequest, request: Request):

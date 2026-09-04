@@ -1,8 +1,7 @@
+import json
 from pathlib import Path
 
 import pytest
-import torch
-
 from olfactory.taxonomy import load_mapping, project_probabilities
 
 
@@ -11,12 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def label_names():
-    dataset = torch.load(
-        ROOT / "odor_morgan_tensor_dataset.pt",
-        map_location="cpu",
-        weights_only=False,
+    mapping = json.loads(
+        (ROOT / "data" / "odor_taxonomy_mapping_v1_2.json").read_text(encoding="utf-8")
     )
-    return tuple(str(label) for label in dataset.label_names)
+    return tuple(str(label) for label in mapping["labels"])
 
 
 def test_mapping_contains_exactly_the_113_model_labels(label_names):

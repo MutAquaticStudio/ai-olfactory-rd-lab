@@ -20,13 +20,23 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, Tuple
 from urllib.parse import quote, unquote, urlparse
 
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from olfactory.academic_evidence import (
+    ACADEMIC_EVIDENCE_SCHEMA_VERSION,
+    AcademicDocument,
+    AcademicEvidence,
+    AcademicEvidenceStore,
+    annotate_chunk_provenance,
+    evidence_records_from_document,
+    sha256_text,
+)
 
 try:  # Prefer the current module name; retain compatibility with older PyMuPDF.
     import pymupdf as fitz
@@ -93,11 +103,16 @@ class PipelineConfig:
     read_timeout: float = 60.0
     contact_email: str | None = None
     device: str = "cpu"
+    evidence_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "csv_path", Path(self.csv_path))
         object.__setattr__(self, "pdf_dir", Path(self.pdf_dir))
         object.__setattr__(self, "index_dir", Path(self.index_dir))
+        if self.evidence_path is None:
+            object.__setattr__(self, "evidence_path", self.index_dir / "academic_evidence.jsonl")
+        else:
+            object.__setattr__(self, "evidence_path", Path(self.evidence_path))
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         if self.chunk_size < 1:
@@ -129,6 +144,7 @@ class PaperContent:
     published_date: str
     text: str
     content_type: str
+    evidence_records: Tuple[AcademicEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +417,59 @@ def _paper_metadata(row: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _source_type(source: str) -> str:
+    """Classify catalog provenance without claiming peer-review status."""
+    normalized = source.strip().lower()
+    if "arxiv" in normalized or "preprint" in normalized:
+        return "PREPRINT"
+    if "review" in normalized:
+        return "REVIEW"
+    if "sensor" in normalized or "machine olfaction" in normalized:
+        return "SENSOR_ONLY"
+    if "pubmed" in normalized or "journal" in normalized:
+        return "PRIMARY_STUDY_OR_REVIEW_UNCLASSIFIED"
+    return "UNKNOWN"
+
+
+def _build_paper_content(
+    metadata: Mapping[str, str],
+    text: str,
+    content_type: str,
+    *,
+    open_access: bool = False,
+    license_status: str | None = None,
+) -> PaperContent:
+    """Attach auditable evidence candidates while preserving raw paper text."""
+    resolved_license = (
+        license_status
+        or ("OA_CONFIRMED" if open_access else "OA_ROUTE_UNVERIFIED")
+        if content_type == "full_text"
+        else "CATALOG_UNVERIFIED"
+    )
+    document = AcademicDocument(
+        paper_id=metadata["paper_id"],
+        title=metadata["title"],
+        link=metadata["link"],
+        source=metadata["source"],
+        doi=metadata["doi"],
+        published_date=metadata["published_date"],
+        content_type=content_type,
+        text_sha256=sha256_text(text),
+        source_type=_source_type(metadata["source"]),
+        # A PDF route is not itself proof of an open license.  Keep that
+        # distinction explicit so exact evidence remains fail-closed.
+        license_status=resolved_license,
+        open_access=bool(open_access and content_type == "full_text"),
+    )
+    evidence = evidence_records_from_document(document, text)
+    return PaperContent(
+        **metadata,
+        text=text,
+        content_type=content_type,
+        evidence_records=evidence,
+    )
+
+
 def process_paper(
     row: Mapping[str, Any],
     config: PipelineConfig,
@@ -425,7 +494,14 @@ def process_paper(
             size = downloader(resolution.url, pdf_path, session, config)
             LOGGER.debug("Downloaded %s bytes for %s", size, metadata["title"])
             text = extractor(pdf_path)
-            return PaperContent(**metadata, text=text, content_type="full_text")
+            parsed_host = (urlparse(resolution.url).hostname or "").lower()
+            route_is_oa = resolution.source == "openalex" or "arxiv.org" in parsed_host
+            return _build_paper_content(
+                metadata,
+                text,
+                "full_text",
+                open_access=route_is_oa,
+            )
         except Exception as exc:
             LOGGER.warning("Full-text processing failed for %s: %s", metadata["title"], exc)
         finally:
@@ -440,7 +516,7 @@ def process_paper(
         LOGGER.info("No open PDF for %s: %s", metadata["title"], resolution.reason)
 
     if abstract:
-        return PaperContent(**metadata, text=abstract, content_type="abstract")
+        return _build_paper_content(metadata, abstract, "abstract")
     LOGGER.error("Skipping %s: neither full text nor Abstract is available", metadata["title"])
     return None
 
@@ -743,13 +819,21 @@ def ingest_academic_literature(
     initialize_index(config, csv_sha256)
     existing_batches = discover_batches(config, csv_sha256)
     completed_ids = processed_paper_ids(existing_batches)
+    evidence_store = AcademicEvidenceStore(config.evidence_path)
+    evidence_store.assert_compatible(csv_sha256)
     next_batch = max((batch.batch_number for batch in existing_batches), default=0) + 1
 
     unprocessed_count = sum(
         1 for _, row in frame.iterrows() if paper_id_for(row) not in completed_ids
     )
     if not unprocessed_count:
+        existing_evidence_count = len(evidence_store.load())
         LOGGER.info("All %d catalog papers are already indexed", len(frame))
+        if not existing_evidence_count:
+            LOGGER.warning(
+                "Academic evidence store is empty for the existing index; "
+                "run ingest --rebuild to derive structure mentions."
+            )
         return {
             "catalog_rows": len(frame),
             "processed": 0,
@@ -757,6 +841,7 @@ def ingest_academic_literature(
             "abstract": 0,
             "failed": 0,
             "skipped_existing": len(frame),
+            "evidence_records": existing_evidence_count,
         }
 
     embeddings = _create_embeddings(
@@ -771,6 +856,7 @@ def ingest_academic_literature(
     )
     pending_chunks: list[ChunkPayload] = []
     pending_papers: list[dict[str, Any]] = []
+    pending_evidence: list[AcademicEvidence] = []
     seen_ids = set(completed_ids)
     counters = {
         "catalog_rows": len(frame),
@@ -779,6 +865,7 @@ def ingest_academic_literature(
         "abstract": 0,
         "failed": 0,
         "skipped_existing": len(completed_ids),
+        "evidence_records": 0,
     }
 
     def flush() -> None:
@@ -793,9 +880,11 @@ def ingest_academic_literature(
             papers=pending_papers,
             embeddings=embeddings,
         )
+        evidence_store.upsert(pending_evidence, dataset_sha256=csv_sha256)
         next_batch += 1
         pending_chunks.clear()
         pending_papers.clear()
+        pending_evidence.clear()
 
     with build_http_session(config.contact_email) as session:
         for catalog_index, row in frame.iterrows():
@@ -813,6 +902,10 @@ def ingest_academic_literature(
                     LOGGER.error("No chunks were produced for %s", content.title)
                     counters["failed"] += 1
                     continue
+                evidence_records = annotate_chunk_provenance(
+                    content.evidence_records,
+                    chunks,
+                )
                 pending_chunks.extend(chunks)
                 pending_papers.append(
                     {
@@ -823,6 +916,8 @@ def ingest_academic_literature(
                         "chunk_count": len(chunks),
                     }
                 )
+                pending_evidence.extend(evidence_records)
+                counters["evidence_records"] += len(evidence_records)
                 counters["processed"] += 1
                 counters[content.content_type] += 1
                 if content.content_type == "full_text":
@@ -966,6 +1061,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--csv", type=Path, default=DEFAULT_CSV_PATH)
     ingest_parser.add_argument("--pdf-dir", type=Path, default=DEFAULT_PDF_DIR)
     ingest_parser.add_argument("--index-dir", type=Path, default=DEFAULT_INDEX_DIR)
+    ingest_parser.add_argument(
+        "--evidence-path",
+        type=Path,
+        help="Path for the derived academic evidence JSONL store",
+    )
     ingest_parser.add_argument("--batch-size", type=int, default=50)
     ingest_parser.add_argument("--request-delay", type=float, default=2.0)
     ingest_parser.add_argument("--contact-email")
@@ -990,6 +1090,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 csv_path=args.csv,
                 pdf_dir=args.pdf_dir,
                 index_dir=args.index_dir,
+                evidence_path=args.evidence_path,
                 batch_size=args.batch_size,
                 request_delay=args.request_delay,
                 contact_email=args.contact_email,

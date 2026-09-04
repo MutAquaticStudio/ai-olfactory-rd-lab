@@ -34,6 +34,10 @@ mlruns/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+academic_literature.csv
+master_olfactory_db.csv
+clean_master_olfactory_db.csv
+*.parquet
 
 # Academic RAG runtime artifacts are reproducible local data.
 academic_pdfs/

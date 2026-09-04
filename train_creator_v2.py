@@ -32,9 +32,11 @@ from olfactory.training.dataset import load_versioned_snapshot
 from olfactory.training.gates import creator_promotion_gate
 from olfactory.training.splits import chemical_group_split
 from olfactory.training.tracking import log_manifest_to_mlflow
+from olfactory.resources import validate_resource_bundle
 
 
 ROOT = Path(__file__).resolve().parent
+RESOURCE_DIR = validate_resource_bundle()
 
 
 def parse_args():
@@ -72,7 +74,7 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     legacy = torch.load(
-        ROOT / "odor_morgan_tensor_dataset.pt",
+        RESOURCE_DIR / "odor_morgan_tensor_dataset.pt",
         map_location="cpu",
         weights_only=False,
     )

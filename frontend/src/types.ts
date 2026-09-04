@@ -99,6 +99,73 @@ export interface ReferenceProviderMeta {
   configuration_error: string | null;
 }
 
+export type AcademicEvidenceStatus = 'EXACT_MATCH' | 'MENTION_ONLY' | 'NO_EXACT_EVIDENCE' | 'REVIEW_REQUIRED';
+
+export interface AcademicNormalizedStructure {
+  raw_value: string;
+  input_kind: string;
+  isomeric_smiles: string | null;
+  connectivity_smiles: string | null;
+  inchikey: string | null;
+  connectivity_key: string | null;
+  stereo_state: string;
+  rdkit_valid: boolean;
+  standardization_log: string[];
+  conflict_flags: string[];
+  review_required: boolean;
+  error_code: string | null;
+  canonical_isomeric_smiles?: string | null;
+  exact_identity_ready?: boolean;
+}
+
+export interface AcademicEvidenceMatch {
+  evidence_id: string;
+  document: {
+    paper_id: string;
+    title: string;
+    link: string;
+    source: string;
+    doi: string;
+    published_date: string;
+    content_type: 'full_text' | 'abstract' | string;
+    text_sha256: string;
+    content_sha256?: string;
+    source_type: string;
+    license_status: string;
+    open_access: boolean;
+  };
+  mention: {
+    raw_value: string;
+    kind: string;
+    page: number | null;
+    chunk_index: number | null;
+    span_start: number | null;
+    span_end: number | null;
+    evidence_excerpt: string;
+    confidence: number;
+    warnings: string[];
+    normalized: AcademicNormalizedStructure | null;
+  };
+  status: AcademicEvidenceStatus;
+  match_level: string | null;
+  odor_descriptors: string[];
+  presence_state: PresenceState;
+  intensity: number | null;
+  source_type: string;
+  review_state: string;
+  conflict_flags: string[];
+  created_at: string;
+}
+
+export interface AcademicEvidenceSummary {
+  query_isomeric_smiles: string;
+  status: AcademicEvidenceStatus;
+  normalized_structure: AcademicNormalizedStructure | null;
+  matches: AcademicEvidenceMatch[];
+  conflicts: string[];
+  provenance: Array<Record<string, unknown>>;
+}
+
 interface AnalysisBase {
   input_smiles: string;
   identifiers: { isomeric_smiles: string; canonical_smiles: string };
@@ -108,6 +175,8 @@ interface AnalysisBase {
   unresolved_stereo_elements: number;
   reference_checks: ReferenceEvidence[];
   reference_gate: ReferenceGate;
+  /** Additive field: older cached API fixtures may omit it. */
+  academic_evidence?: AcademicEvidenceSummary | null;
 }
 
 export interface CompleteAnalysis extends AnalysisBase {
@@ -162,6 +231,15 @@ export interface AppMeta {
     available: boolean;
     label_semantics: PresenceState[];
     intensity_scale: [number, number];
+  };
+  academic_evidence?: {
+    available: boolean;
+    schema_version: number;
+    default_content_type: string;
+    abstracts_opt_in: boolean;
+    training_auto_import: boolean;
+    identity_policy: string;
+    safety_policy: string;
   };
   reference_verification: {
     providers: ReferenceProviderMeta[];

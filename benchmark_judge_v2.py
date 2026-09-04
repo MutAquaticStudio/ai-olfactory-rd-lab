@@ -15,9 +15,11 @@ from olfactory.training.dataset import load_legacy_baseline, load_versioned_snap
 from olfactory.training.judge_v2 import train_judge_v2
 from olfactory.training.splits import SplitManifest, chemical_group_folds, chemical_group_split
 from olfactory.training.benchmark import load_immutable_manifest, split_from_payload
+from olfactory.resources import validate_resource_bundle
 
 
 ROOT = Path(__file__).resolve().parent
+RESOURCE_DIR = validate_resource_bundle()
 
 
 def parse_args():
@@ -61,10 +63,10 @@ def fold_split(development_indices, folds, fold_index, seed):
 def main() -> None:
     args = parse_args()
     if args.legacy_baseline:
-        table = load_legacy_baseline(ROOT / "clean_dataset.csv", ROOT / "odor_morgan_tensor_dataset.pt")
+        table = load_legacy_baseline(ROOT / "clean_dataset.csv", RESOURCE_DIR / "odor_morgan_tensor_dataset.pt")
         dataset_version = args.dataset_version or "legacy-clean-3522"
     else:
-        legacy = torch.load(ROOT / "odor_morgan_tensor_dataset.pt", map_location="cpu", weights_only=False)
+        legacy = torch.load(RESOURCE_DIR / "odor_morgan_tensor_dataset.pt", map_location="cpu", weights_only=False)
         labels = tuple(str(value) for value in legacy.label_names)
         table = load_versioned_snapshot(args.snapshot, labels, strict_panel_gate=not args.allow_pre_panel_data)
         dataset_version = args.dataset_version or args.snapshot.stem
