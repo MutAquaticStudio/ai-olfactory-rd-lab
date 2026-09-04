@@ -124,6 +124,7 @@ class LegacyMorganPredictor:
         *,
         identity: PredictionIdentity,
         training_fingerprints: Optional[torch.Tensor] = None,
+        calibration: Optional[object] = None,
     ) -> None:
         self.model = model
         self.label_names = tuple(str(value) for value in label_names)
@@ -131,6 +132,9 @@ class LegacyMorganPredictor:
             raise ValueError(f"Legacy predictor requires exactly {ODOR_LABEL_COUNT} labels")
         self.identity = identity
         self.training_fingerprints = training_fingerprints
+        self.calibration = calibration
+        if self.identity.calibration_version not in {"", "uncalibrated"} and calibration is None:
+            raise ValueError("A declared calibration version requires a calibration artifact")
 
     def predict(self, isomeric_smiles: Sequence[str]) -> PredictionBatch:
         molecules = []
@@ -143,7 +147,12 @@ class LegacyMorganPredictor:
         if molecules:
             features = torch.stack([create_morgan_tensor(molecule) for molecule in molecules])
             with torch.inference_mode():
-                probabilities = torch.sigmoid(self.model(features.to(model_device(self.model)))).cpu().numpy()
+                logits = self.model(features.to(model_device(self.model))).cpu().numpy()
+                probabilities = (
+                    self.calibration.transform_logits(logits)
+                    if self.calibration is not None
+                    else 1.0 / (1.0 + np.exp(-np.clip(logits, -40.0, 40.0)))
+                )
             similarities = np.asarray(
                 [
                     nearest_training_similarity(feature, self.training_fingerprints)
@@ -174,7 +183,8 @@ class EnsemblePredictor:
 
     The ensemble reports the standard deviation of presence probabilities as
     epistemic uncertainty.  It is useful in shadow evaluation; callers still
-    need a calibration bundle fitted on validation data before promotion.
+    need a calibration bundle fitted on the dedicated calibration partition
+    before promotion.
     """
 
     def __init__(self, predictors: Sequence[MoleculePredictor], *, model_version: str = "ensemble"):

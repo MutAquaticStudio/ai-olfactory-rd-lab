@@ -13,7 +13,11 @@ from typing import Dict, Mapping, Sequence
 import numpy as np
 
 from .dataset import MolecularTargetTable
-from .splits import SplitManifest, chemical_group_folds, chemical_group_split
+from .splits import (
+    SplitManifest,
+    chemical_group_calibrated_split,
+    chemical_group_folds,
+)
 
 
 def dataset_fingerprint(table: MolecularTargetTable) -> str:
@@ -31,7 +35,7 @@ def split_manifest_payload(split: SplitManifest, *, table: MolecularTargetTable,
     payload = split.to_dict()
     payload.update(
         {
-            "schema_version": 1,
+            "schema_version": 2 if len(split.ratios) == 4 else 1,
             "dataset_version": dataset_version,
             "dataset_sha256": dataset_fingerprint(table),
             "label_names": list(table.label_names),
@@ -49,10 +53,19 @@ def build_benchmark_manifest(
     similarity_threshold: float = 0.6,
     fold_count: int = 5,
 ) -> Dict[str, object]:
-    """Create the fixed 70/15/15 split plus development CV folds."""
+    """Create the fixed 60/10/15/15 split plus development CV folds."""
     labels = np.nan_to_num(table.presence, nan=0.0)
-    split = chemical_group_split(table.smiles, labels, seed=seed, similarity_threshold=similarity_threshold)
-    development = list(split.train_indices) + list(split.validation_indices)
+    split = chemical_group_calibrated_split(
+        table.smiles,
+        labels,
+        seed=seed,
+        similarity_threshold=similarity_threshold,
+    )
+    development = (
+        list(split.train_indices)
+        + list(split.calibration_indices)
+        + list(split.validation_indices)
+    )
     folds = chemical_group_folds(
         [table.smiles[index] for index in development],
         labels[development],
@@ -104,6 +117,8 @@ def load_immutable_manifest(path: Path, *, table: MolecularTargetTable | None = 
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     required = {"schema_version", "dataset_version", "dataset_sha256", "split_hash", "train_indices", "validation_indices", "test_indices"}
     missing = required - set(payload)
+    if int(payload.get("schema_version", 1)) >= 2 and "calibration_indices" not in payload:
+        missing.add("calibration_indices")
     if missing:
         raise ValueError(f"Split manifest missing fields: {sorted(missing)}")
     declared_hash = payload.get("manifest_sha256")
@@ -124,21 +139,28 @@ def load_immutable_manifest(path: Path, *, table: MolecularTargetTable | None = 
 def split_from_payload(payload: Mapping[str, object]) -> SplitManifest:
     """Convert a validated JSON manifest to the training split value object."""
     assert_no_leakage(payload)
+    has_calibration = "calibration_indices" in payload
+    default_ratios = (0.60, 0.10, 0.15, 0.15) if has_calibration else (0.70, 0.15, 0.15)
     return SplitManifest(
-        tuple(int(value) for value in payload["train_indices"]),
-        tuple(int(value) for value in payload["validation_indices"]),
-        tuple(int(value) for value in payload["test_indices"]),
-        tuple(str(value) for value in payload.get("group_ids", [])),
-        int(payload.get("seed", 42)),
-        tuple(float(value) for value in payload.get("ratios", (0.70, 0.15, 0.15))),
-        float(payload.get("similarity_threshold", 0.6)),
-        str(payload["split_hash"]),
+        train_indices=tuple(int(value) for value in payload["train_indices"]),
+        validation_indices=tuple(int(value) for value in payload["validation_indices"]),
+        test_indices=tuple(int(value) for value in payload["test_indices"]),
+        group_ids=tuple(str(value) for value in payload.get("group_ids", [])),
+        seed=int(payload.get("seed", 42)),
+        ratios=tuple(float(value) for value in payload.get("ratios", default_ratios)),
+        similarity_threshold=float(payload.get("similarity_threshold", 0.6)),
+        split_hash=str(payload["split_hash"]),
+        calibration_indices=tuple(int(value) for value in payload.get("calibration_indices", [])),
     )
 
 
 def assert_no_leakage(payload: Mapping[str, object]) -> None:
     """Validate disjoint indices and connectivity groups before a run."""
-    partitions = [set(payload["train_indices"]), set(payload["validation_indices"]), set(payload["test_indices"])]
+    partition_keys = ["train_indices"]
+    if "calibration_indices" in payload:
+        partition_keys.append("calibration_indices")
+    partition_keys.extend(("validation_indices", "test_indices"))
+    partitions = [set(payload[key]) for key in partition_keys]
     if any(left & right for index, left in enumerate(partitions) for right in partitions[index + 1 :]):
         raise ValueError("Benchmark partitions overlap")
     group_ids = payload.get("group_ids", [])
@@ -147,10 +169,10 @@ def assert_no_leakage(payload: Mapping[str, object]) -> None:
     all_indices = set().union(*partitions)
     if any(int(index) < 0 or int(index) >= len(group_ids) for index in all_indices):
         raise ValueError("Benchmark manifest group_ids do not cover all indices")
+    if all_indices != set(range(len(group_ids))):
+        raise ValueError("Benchmark manifest must assign every row exactly once")
     split_by_group: Dict[str, int] = {}
-    for index in payload["train_indices"]:
-        split_by_group[str(group_ids[index])] = 0
-    for split_number, key in ((1, "validation_indices"), (2, "test_indices")):
+    for split_number, key in enumerate(partition_keys):
         for index in payload[key]:
             group = str(group_ids[index])
             previous = split_by_group.setdefault(group, split_number)

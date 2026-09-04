@@ -239,6 +239,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
 .candidate-controls { position: relative; z-index: 5; display: grid; grid-template-columns: minmax(300px, 1.4fr) minmax(260px, 0.8fr) minmax(290px, 1fr) auto; align-items: end; gap: 22px; padding: 17px 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .target-selector { min-width: 0; position: relative; }
 .target-selector > label, .diversity-control > label { display: block; margin-bottom: 7px; }
+.target-limit { position: absolute; top: 0; right: 0; color: var(--faint); font-size: 9px; }
 .target-selector details { position: relative; }
 .target-selector summary { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--input-bg); cursor: pointer; list-style: none; }
 .target-selector summary::-webkit-details-marker { display: none; }
@@ -252,6 +253,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
 .target-options button { min-height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 9px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; text-align: left; cursor: pointer; }
 .target-options button:hover, .target-options button.is-selected { color: var(--text); background: var(--surface-subtle); }
 .target-options button.is-selected { color: var(--accent); }
+.target-options button:disabled { opacity: .45; cursor: not-allowed; }
+.target-options button > span { display: flex; align-items: center; gap: 7px; }
+.target-options button small { padding: 2px 4px; border-radius: 4px; color: var(--warning); background: var(--warning-soft); font-size: 7px; }
 .diversity-control > div { height: 44px; display: grid; grid-template-columns: 48px 1fr; align-items: center; gap: 12px; }
 .diversity-control output { height: 42px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--input-bg); color: var(--text-strong); font-weight: 650; }
 .diversity-control input { width: 100%; accent-color: var(--accent); }
@@ -304,6 +308,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
 .candidate-badges { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .candidate-badges span { display: inline-flex; align-items: center; gap: 4px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); background: var(--surface-subtle); font-size: 8px; }
 .candidate-badges span:first-child { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 28%, var(--border)); background: var(--accent-soft); }
+.candidate-badges .match-badge.match-strict { color: var(--success); background: var(--success-soft); }
+.candidate-badges .match-badge.match-relaxed { color: var(--warning); background: var(--warning-soft); }
 .candidate-smiles { min-width: 0; color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fit-cell > span { display: block; color: var(--muted); font-size: 8px; }
 .fit-cell > strong { display: inline-block; margin: 2px 0 4px; color: var(--text-strong); font-size: 15px; }
@@ -317,6 +323,24 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
 .candidate-data { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .candidate-data .chemistry-screen.is-compact .metric-grid { grid-template-columns: 1fr 1fr; column-gap: 10px; }
 .candidate-profile { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.target-match-panel, .synthesis-evidence { margin-top: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.target-match-panel.match-relaxed { border-left: 3px solid var(--warning); }
+.target-match-panel.match-strict { border-left: 3px solid var(--success); }
+.target-match-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.target-match-panel h3, .synthesis-evidence h3 { margin: 0; color: var(--text-strong); font-size: 12px; }
+.target-match-panel header p, .synthesis-evidence p { margin: 3px 0 0; color: var(--muted); font-size: 9px; }
+.target-match-panel header > strong { color: var(--text-strong); font-size: 18px; }
+.target-match-panel dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 12px 0; }
+.target-match-panel dl > div { padding: 7px; border-radius: 5px; background: var(--surface-subtle); }
+.target-match-panel dt { color: var(--muted); font-size: 8px; }
+.target-match-panel dd { margin: 3px 0 0; color: var(--text); font-size: 10px; font-weight: 650; }
+.target-evidence-list { display: grid; gap: 5px; }
+.target-evidence-list > div { display: grid; grid-template-columns: minmax(120px, 1fr) auto auto; align-items: center; gap: 10px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 5px; }
+.target-evidence-list span { display: grid; }
+.target-evidence-list strong { color: var(--text); font-size: 10px; }
+.target-evidence-list small { color: var(--muted); font-size: 8px; }
+.target-evidence-list code { color: var(--accent-text); font-size: 10px; }
+.synthesis-evidence > strong { display: block; margin-top: 9px; color: var(--muted); font-size: 10px; }
 .reference-evidence { margin-top: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .reference-evidence > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
 .reference-evidence h3 { margin: 0; color: var(--text-strong); font-size: 12px; }
@@ -528,6 +552,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
   .conformer-metadata span { text-align: left; }
   .conformer-metadata small { grid-column: auto; }
   .candidate-data, .candidate-profile, .reference-evidence-list { grid-template-columns: 1fr; }
+  .target-match-panel dl { grid-template-columns: 1fr 1fr; }
+  .target-evidence-list > div { grid-template-columns: 1fr auto; }
+  .target-evidence-list > div > small { grid-column: 1 / -1; }
   .candidate-data .chemistry-screen.is-compact .metric-grid { grid-template-columns: 1fr; }
   .review-row { grid-template-columns: 70px 1fr; }
   .review-row .reference-evidence { grid-column: 1 / -1; }

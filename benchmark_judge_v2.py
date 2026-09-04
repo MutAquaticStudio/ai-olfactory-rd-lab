@@ -13,7 +13,11 @@ import torch
 
 from olfactory.training.dataset import load_legacy_baseline, load_versioned_snapshot
 from olfactory.training.judge_v2 import train_judge_v2
-from olfactory.training.splits import SplitManifest, chemical_group_folds, chemical_group_split
+from olfactory.training.splits import (
+    SplitManifest,
+    chemical_group_calibrated_split,
+    chemical_group_folds,
+)
 from olfactory.training.benchmark import load_immutable_manifest, split_from_payload
 from olfactory.resources import validate_resource_bundle
 
@@ -44,19 +48,38 @@ def fold_split(development_indices, folds, fold_index, seed):
     holdout = [development_indices[index] for index in folds[fold_index]]
     validation_fold = (fold_index + 1) % len(folds)
     validation = [development_indices[index] for index in folds[validation_fold]]
-    excluded = set(folds[fold_index]) | set(folds[validation_fold])
+    calibration_fold = (fold_index + 2) % len(folds)
+    calibration = [development_indices[index] for index in folds[calibration_fold]]
+    excluded = (
+        set(folds[fold_index])
+        | set(folds[validation_fold])
+        | set(folds[calibration_fold])
+    )
     train = [development_indices[index] for index in range(len(development_indices)) if index not in excluded]
-    content = {"train": sorted(train), "validation": sorted(validation), "cv_holdout": sorted(holdout), "seed": seed, "fold": fold_index}
+    content = {
+        "train": sorted(train),
+        "calibration": sorted(calibration),
+        "validation": sorted(validation),
+        "cv_holdout": sorted(holdout),
+        "seed": seed,
+        "fold": fold_index,
+    }
     split_hash = hashlib.sha256(json.dumps(content, sort_keys=True).encode("utf-8")).hexdigest()
     return SplitManifest(
-        tuple(content["train"]),
-        tuple(content["validation"]),
-        tuple(content["cv_holdout"]),
-        tuple(),
-        seed,
-        (len(train) / len(development_indices), len(validation) / len(development_indices), len(holdout) / len(development_indices)),
-        0.6,
-        split_hash,
+        train_indices=tuple(content["train"]),
+        validation_indices=tuple(content["validation"]),
+        test_indices=tuple(content["cv_holdout"]),
+        group_ids=tuple(),
+        seed=seed,
+        ratios=(
+            len(train) / len(development_indices),
+            len(calibration) / len(development_indices),
+            len(validation) / len(development_indices),
+            len(holdout) / len(development_indices),
+        ),
+        similarity_threshold=0.6,
+        split_hash=split_hash,
+        calibration_indices=tuple(content["calibration"]),
     )
 
 
@@ -74,8 +97,12 @@ def main() -> None:
     if args.split_manifest:
         locked = split_from_payload(load_immutable_manifest(args.split_manifest, table=table))
     else:
-        locked = chemical_group_split(table.smiles, target_matrix, seed=42)
-    development = [*locked.train_indices, *locked.validation_indices]
+        locked = chemical_group_calibrated_split(table.smiles, target_matrix, seed=42)
+    development = [
+        *locked.train_indices,
+        *locked.calibration_indices,
+        *locked.validation_indices,
+    ]
     folds = chemical_group_folds(
         [table.smiles[index] for index in development],
         target_matrix[development],

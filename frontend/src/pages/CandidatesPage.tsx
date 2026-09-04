@@ -28,11 +28,16 @@ export const EMPTY_CANDIDATE_WORKSPACE: CandidateWorkspaceState = {
   result: null
 };
 
-export function createCandidateWorkspace(labels: string[]): CandidateWorkspaceState {
+export function createCandidateWorkspace(meta: AppMeta): CandidateWorkspaceState {
+  const selectable = new Set(
+    meta.target_matching.descriptors
+      .filter((item) => item.selectable)
+      .map((item) => item.name)
+  );
   return {
     ...EMPTY_CANDIDATE_WORKSPACE,
     initialized: true,
-    targets: ['jasmine', 'woody'].filter((label) => labels.includes(label))
+    targets: ['jasmine', 'woody'].filter((label) => selectable.has(label))
   };
 }
 
@@ -93,7 +98,7 @@ export default function CandidatesPage({ meta, workspace, setWorkspace }: {
   return (
     <AnimatedContent className="page page-candidates">
       <section className="candidate-controls">
-        <TargetSelector labels={meta.label_names} selected={targets} onChange={(nextTargets) => setWorkspace((previous) => ({ ...previous, targets: nextTargets }))} />
+        <TargetSelector labels={meta.label_names} metadata={meta.target_matching.descriptors} maxTargets={meta.generation_limits.max_target_descriptors} selected={targets} onChange={(nextTargets) => setWorkspace((previous) => ({ ...previous, targets: nextTargets }))} />
         <div className="diversity-control"><label htmlFor="diversity">{copy.diversity}</label><div><output>{diversity.toFixed(1)}</output><input id="diversity" type="range" min="0.2" max="1.2" step="0.1" value={diversity} onChange={(event) => setWorkspace((previous) => ({ ...previous, diversity: Number(event.target.value) }))} /></div></div>
         {requiredExternalProviders.length > 0 && <label className="consent-control"><input type="checkbox" checked={consent} onChange={(event) => setWorkspace((previous) => ({ ...previous, consent: event.target.checked }))} /><span>{copy.consent(consentIdentifiers, consentProviderNames.join(', '))}</span></label>}
         <div className="generation-actions">

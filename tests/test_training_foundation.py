@@ -1,16 +1,28 @@
 import json
 
 import numpy as np
+import pytest
 import torch
+from rdkit import Chem
 
 from olfactory.training.calibration import CalibrationBundle
 from olfactory.training.baselines import train_masked_morgan_mlp
-from olfactory.training.creator_v2 import ConditionalSELFIESTransformer, robust_target_fit
+from olfactory.training.creator_v2 import (
+    ConditionalSELFIESTransformer,
+    condition_vector,
+    robust_target_fit,
+    target_alignment_benchmark,
+    target_condition_vector,
+)
 from olfactory.training.judge_v2 import effective_positive_weights, masked_multitask_loss
 from olfactory.training.gates import creator_promotion_gate, judge_promotion_gate
 from olfactory.training.metrics import intensity_metrics, multilabel_metrics
 from olfactory.training.registry import ModelRegistry, sha256_file
-from olfactory.training.splits import chemical_group_folds, chemical_group_split
+from olfactory.training.splits import (
+    chemical_group_calibrated_split,
+    chemical_group_folds,
+    chemical_group_split,
+)
 
 
 def test_chemical_split_is_deterministic_and_blocks_connectivity_leakage():
@@ -55,6 +67,36 @@ def test_grouped_five_fold_split_is_deterministic_and_complete():
         for row in fold:
             membership.setdefault(first.group_ids[row], set()).add(fold_index)
     assert all(len(folds) == 1 for folds in membership.values())
+
+
+def test_calibrated_split_has_four_disjoint_chemical_partitions():
+    smiles = [
+        "CCO", "OCC", "CCN", "CCCO", "CCCCO", "CCCl", "CCBr", "CCF",
+        "c1ccccc1", "Cc1ccccc1", "C1CCCCC1", "CC1CCCCC1",
+    ]
+    labels = np.eye(len(smiles), 3, dtype=float)
+    first = chemical_group_calibrated_split(smiles, labels, seed=9)
+    second = chemical_group_calibrated_split(smiles, labels, seed=9)
+    partitions = [
+        set(first.train_indices),
+        set(first.calibration_indices),
+        set(first.validation_indices),
+        set(first.test_indices),
+    ]
+
+    assert first.ratios == (0.60, 0.10, 0.15, 0.15)
+    assert first.split_hash == second.split_hash
+    assert set().union(*partitions) == set(range(len(smiles)))
+    assert not any(
+        left & right
+        for index, left in enumerate(partitions)
+        for right in partitions[index + 1 :]
+    )
+    membership = {}
+    for split_number, indices in enumerate(partitions):
+        for row in indices:
+            membership.setdefault(first.group_ids[row], set()).add(split_number)
+    assert all(len(values) == 1 for values in membership.values())
 
 
 def test_masked_metrics_ignore_unassessed_targets():
@@ -146,6 +188,68 @@ def test_conditional_creator_contract_and_robust_fit_penalty():
 
     assert logits.shape == (2, 4, 12)
     assert 0 < robust <= target_fit <= 1
+
+
+def test_creator_condition_keeps_unassessed_separate_from_absent():
+    presence = np.asarray([1.0, 0.0, np.nan], dtype=np.float32)
+    intensity = np.asarray([6.0, np.nan, np.nan], dtype=np.float32)
+
+    condition = condition_vector(presence, intensity, Chem.MolFromSmiles("CCO"))
+
+    assert condition.shape == (15,)
+    assert condition[:3].tolist() == [1.0, 0.0, 0.0]
+    assert condition[3:6].tolist() == [1.0, 1.0, 0.0]
+    assert condition[6:9].tolist() == pytest.approx([0.6, 0.0, 0.0])
+    assert condition[9:12].tolist() == [1.0, 0.0, 0.0]
+
+
+def test_target_condition_does_not_mark_unselected_descriptors_absent():
+    condition = target_condition_vector(
+        ["floral", "woody", "musk"], ["woody"]
+    )
+
+    assert condition.shape == (15,)
+    assert condition[:3].tolist() == [0.0, 1.0, 0.0]
+    assert condition[3:6].tolist() == [0.0, 1.0, 0.0]
+
+
+def test_conditional_creator_receives_target_signal_in_generation_logits():
+    torch.manual_seed(5)
+    model = ConditionalSELFIESTransformer(
+        vocab_size=9,
+        condition_size=15,
+        d_model=24,
+        nhead=4,
+        layers=2,
+        dropout=0.0,
+        max_length=8,
+    ).eval()
+    tokens = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    floral = torch.from_numpy(target_condition_vector(["floral", "woody", "musk"], ["floral"]))
+    woody = torch.from_numpy(target_condition_vector(["floral", "woody", "musk"], ["woody"]))
+
+    with torch.inference_mode():
+        floral_logits = model(tokens, floral.unsqueeze(0))
+        woody_logits = model(tokens, woody.unsqueeze(0))
+
+    assert not torch.allclose(floral_logits, woody_logits)
+
+
+def test_creator_target_benchmark_compares_equal_budget_unconditional_control():
+    conditional = np.full((8, 10, 2), 0.50)
+    unconditional = np.full((8, 10, 2), 0.10)
+
+    metrics = target_alignment_benchmark(
+        conditional,
+        unconditional,
+        bootstrap_iterations=100,
+        seed=9,
+    )
+
+    assert metrics["conditional_strict_yield_mean"] == 10
+    assert metrics["unconditional_strict_yield_mean"] == 0
+    assert metrics["runs_with_three_strict"] == 1
+    assert metrics["target_enrichment_ci_lower"] > 0
 
 
 def test_promotion_gates_require_calibration_intensity_and_blind_panel():

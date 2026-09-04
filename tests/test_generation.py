@@ -15,6 +15,7 @@ from olfactory.generation import (
     GenerationPhase,
     ScreenedCandidate,
     generate_candidate_pool,
+    generate_target_aligned_pool,
     rank_candidates,
 )
 from olfactory.models import OdorPredictor
@@ -395,3 +396,77 @@ def test_all_enabled_reference_sources_must_return_no_match_before_acceptance():
     assert phases.index(GenerationPhase.CHECKING_REFERENCES) < phases.index(
         GenerationPhase.REFERENCE_ACCEPTED
     ) < phases.index(GenerationPhase.PREPARING_3D)
+
+
+def test_target_aligned_pool_scores_full_pool_before_reference_and_uses_best_scores():
+    operation_log = []
+
+    class OrderedVerifier(StaticReferenceVerifier):
+        def verify(self, query, *, consents):
+            operation_log.append(("reference", query.isomeric_smiles))
+            return super().verify(query, consents=consents)
+
+    def score(variants):
+        operation_log.append(("score", len(variants)))
+        return [float(molecule.GetNumHeavyAtoms()) for molecule in variants]
+
+    stream = generate_target_aligned_pool(
+        creator_model=None,
+        char_to_idx={},
+        idx_to_char=(),
+        temperature=0.8,
+        existing_isomeric_smiles_set=set(),
+        reference_verifier=OrderedVerifier(reference_bundle(ReferenceStatus.NO_MATCH)),
+        reference_consents={"PUBCHEM"},
+        variant_scorer=score,
+        required_count=2,
+        provisional_pool_size=3,
+        max_attempts=3,
+        sampler=sampler_from(["CCO", "CCCO", "CCCCO"]),
+        conformer_builder=available_ensemble,
+    )
+
+    events, result = exhaust(stream)
+
+    first_reference = next(index for index, item in enumerate(operation_log) if item[0] == "reference")
+    assert all(item[0] == "score" for item in operation_log[:first_reference])
+    assert [item.isomeric_smiles for item in result.accepted_candidates] == [
+        "CCCCO",
+        "CCCO",
+    ]
+    phases = [event.phase for event in events]
+    assert phases.count(GenerationPhase.TARGET_SCORING) == 3
+    assert phases.index(GenerationPhase.RANKING) < phases.index(
+        GenerationPhase.CHECKING_REFERENCES
+    )
+
+
+def test_target_aligned_pool_supplies_elite_prefix_during_refinement():
+    starts = []
+    values = iter(["CCO", "CCCO", "CCCCO", "CCCCCO"])
+
+    def sampler(**kwargs):
+        starts.append(kwargs.get("start_smiles"))
+        return next(values)
+
+    stream = generate_target_aligned_pool(
+        creator_model=None,
+        char_to_idx={},
+        idx_to_char=(),
+        temperature=0.8,
+        existing_isomeric_smiles_set=set(),
+        reference_verifier=StaticReferenceVerifier(reference_bundle(ReferenceStatus.NO_MATCH)),
+        reference_consents={"PUBCHEM"},
+        variant_scorer=lambda variants: [float(item.GetNumHeavyAtoms()) for item in variants],
+        required_count=1,
+        provisional_pool_size=4,
+        max_attempts=4,
+        sampler=sampler,
+        conformer_builder=available_ensemble,
+    )
+
+    exhaust(stream)
+
+    assert starts[:2] == [None, None]
+    assert starts[2] in {"CCO", "CCCO"}
+    assert starts[3] is not None

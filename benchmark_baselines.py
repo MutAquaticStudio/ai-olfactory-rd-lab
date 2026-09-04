@@ -18,7 +18,7 @@ from olfactory.training.calibration import CalibrationBundle
 from olfactory.training.dataset import load_legacy_baseline, load_versioned_snapshot
 from olfactory.training.metrics import multilabel_metrics
 from olfactory.training.registry import sha256_file
-from olfactory.training.splits import chemical_group_split
+from olfactory.training.splits import chemical_group_calibrated_split
 from olfactory.training.benchmark import dataset_fingerprint, load_immutable_manifest, split_from_payload
 from olfactory.resources import validate_resource_bundle
 
@@ -57,19 +57,49 @@ def main() -> None:
         payload = load_immutable_manifest(args.split_manifest, table=table)
         split = split_from_payload(payload)
     else:
-        split = chemical_group_split(table.smiles, np.nan_to_num(table.presence, nan=0.0), seed=args.seed)
+        split = chemical_group_calibrated_split(
+            table.smiles,
+            np.nan_to_num(table.presence, nan=0.0),
+            seed=args.seed,
+        )
     train, validation, test = map(list, (split.train_indices, split.validation_indices, split.test_indices))
+    calibration = list(split.calibration_indices or split.validation_indices)
 
-    logistic_validation, estimators = fit_ovr_logistic(features[train].numpy(), table.presence[train], features[validation].numpy())
-    logistic_test, _ = fit_ovr_logistic(features[train].numpy(), table.presence[train], features[test].numpy())
-    logistic_calibration = CalibrationBundle.fit(logits(logistic_validation), table.presence[validation], table.label_names)
+    logistic_evaluation, estimators = fit_ovr_logistic(
+        features[train].numpy(),
+        table.presence[train],
+        features[calibration + validation + test].numpy(),
+    )
+    calibration_end = len(calibration)
+    validation_end = calibration_end + len(validation)
+    logistic_calibration_scores = logistic_evaluation[:calibration_end]
+    logistic_validation = logistic_evaluation[calibration_end:validation_end]
+    logistic_test = logistic_evaluation[validation_end:]
+    logistic_calibration = CalibrationBundle.fit(
+        logits(logistic_calibration_scores),
+        table.presence[calibration],
+        table.label_names,
+    )
+    logistic_validation_metrics = multilabel_metrics(
+        table.presence[validation],
+        logistic_calibration.transform_logits(logits(logistic_validation)),
+    )
     logistic_metrics = multilabel_metrics(table.presence[test], logistic_calibration.transform_logits(logits(logistic_test)))
 
     morgan = train_masked_morgan_mlp(features, torch.from_numpy(table.presence), train, validation, seed=args.seed)
     with torch.inference_mode():
+        calibration_logits = morgan.model(features[calibration]).numpy()
         validation_logits = morgan.model(features[validation]).numpy()
         test_logits = morgan.model(features[test]).numpy()
-    morgan_calibration = CalibrationBundle.fit(validation_logits, table.presence[validation], table.label_names)
+    morgan_calibration = CalibrationBundle.fit(
+        calibration_logits,
+        table.presence[calibration],
+        table.label_names,
+    )
+    morgan_validation_metrics = multilabel_metrics(
+        table.presence[validation],
+        morgan_calibration.transform_logits(validation_logits),
+    )
     morgan_metrics = multilabel_metrics(table.presence[test], morgan_calibration.transform_logits(test_logits))
 
     run_id = f"baseline-ladder-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-s{args.seed}"
@@ -86,9 +116,14 @@ def main() -> None:
         "dataset_sha256": dataset_fingerprint(table),
         "seed": args.seed,
         "features": {"radius": 2, "bits": 2048, "use_chirality": True},
-        "logistic": {"metrics": logistic_metrics, "label_models": len(estimators)},
+        "logistic": {
+            "validation_metrics": logistic_validation_metrics,
+            "locked_test_metrics": logistic_metrics,
+            "label_models": len(estimators),
+        },
         "morgan_mlp": {
-            "metrics": morgan_metrics,
+            "validation_metrics": morgan_validation_metrics,
+            "locked_test_metrics": morgan_metrics,
             "best_validation_loss": morgan.best_validation_loss,
             "epochs": morgan.epochs,
             "weights_path": str(weights_path),

@@ -50,20 +50,32 @@ pipeline.
 
 ### Thiết kế ứng viên
 
-- Chọn một hoặc nhiều descriptor mục tiêu và mức đa dạng khi lấy mẫu.
+- Chọn tối đa ba descriptor mục tiêu và mức đa dạng khi lấy mẫu.
+- Không cho chọn descriptor thiếu support; phân biệt rõ `SUPPORTED` và
+  `LIMITED_EVIDENCE`.
 - Stream tiến độ sinh và sàng lọc, đồng thời cho phép hủy request.
 - Loại cấu trúc lỗi, trùng, chưa giải quyết stereo, bị từ chối, đã biết hoặc chưa
   xác minh trước khi xếp hạng.
 - Tự động liệt kê tối đa bốn stereo variant cho mỗi ứng viên và chỉ giữ tối đa
   một đại diện cho mỗi connectivity.
-- Xếp hạng ứng viên được chấp nhận bằng điểm target fit theo trung bình nhân:
+- Chấm điểm pool đã qua chemistry trước PubChem, 3D, academic hoặc route search.
+  Artifact SELFIES có điều kiện sau khi được promote sẽ nhận target cùng các
+  assessed/intensity mask; Char-LSTM hiện tại vẫn là fallback có công khai.
+- Xếp hạng bằng geometric mean đã trừ uncertainty:
 
 ```text
-Target fit = exp(mean(log(P(các descriptor mục tiêu đã chọn))))
+conservative_i = max(0, ensemble_mean_i - 1.64 × ensemble_std_i)
+Robust target fit = exp(mean(log(conservative_i)))
 ```
 
-- Hiển thị ba ứng viên đầu cùng cấu trúc 2D/3D, descriptor, xác suất mục tiêu,
-  descriptor hỗ trợ, bằng chứng hóa học và bằng chứng tham chiếu.
+- Với descriptor `SUPPORTED` đã calibration, strict match yêu cầu từng target
+  đạt 30% và robust target fit đạt 40%. Descriptor limited-evidence dùng ngưỡng
+  calibration riêng, không được diễn giải như xác suất 40/30 tuyệt đối.
+- Nếu chưa đủ ba cấu trúc, ngưỡng được hạ công khai theo bước 0,05; kết quả luôn
+  mang nhãn `RELAXED`, lưu ngưỡng thực tế và nói rõ chưa đạt yêu cầu ban đầu.
+- Hiển thị tối đa ba ứng viên cùng 2D/3D, target evidence, uncertainty,
+  applicability domain, reference/academic evidence, Ertl SAscore và route
+  evidence AiZynthFinder tùy chọn.
 - Giữ các mục cần review hóa học hoặc review nguồn tham chiếu ngoài shortlist.
 
 Vòng lặp dừng khi có năm cấu trúc được chấp nhận, đạt 200 lần thử hoặc hết 120
@@ -125,7 +137,7 @@ source .venv-training/bin/activate
 python -m pip install -r requirements-deepchem.txt
 ```
 
-Tạo split 70/15/15 dùng chung một lần và tái sử dụng checksum của nó cho mọi
+Tạo split 60/10/15/15 dùng chung một lần và tái sử dụng checksum của nó cho mọi
 model:
 
 ```bash
@@ -136,8 +148,9 @@ python benchmark_baselines.py --legacy-baseline \
 
 Các stereo variant được group theo connectivity InChIKey; cấu trúc vòng được
 group theo Murcko scaffold, còn cấu trúc acyclic theo độ tương đồng Morgan bằng
-Butina. Random split chỉ dùng cho diagnostic. Locked test không bao giờ được dùng
-để tuning.
+Butina. Random split chỉ dùng cho diagnostic. Early stopping chỉ dùng validation;
+calibration/threshold chỉ dùng calibration partition; locked test không bao giờ
+được dùng để tuning.
 
 ## Yêu cầu hệ thống
 
@@ -261,6 +274,36 @@ calibration, 697 hàng validation và 779 hàng locked test.
 Các số liệu này mô tả một candidate weak-taxonomy 254 nhãn, không phải model
 production 113 nhãn đã đăng ký. Chúng được giữ như bằng chứng huấn luyện có thể
 tái lập và bản thân chúng chưa đủ để vượt promotion gate.
+
+### Mức sẵn sàng để retrain
+
+Preflight ngày 2026-09-04 xác nhận file riêng tư
+`clean_master_olfactory_db.csv` có 4.729 Isomeric SMILES duy nhất. Hai trường
+`odor_types` và `odor_descriptors` hiện mở rộng thành 254 nhãn weak-taxonomy,
+trong khi contract dự đoán production yêu cầu đúng 113 descriptor theo thứ tự cố
+định. Catalog này ghi nhận mention, chưa phải assessment đã review theo ba trạng
+thái `PRESENT / ABSENT / UNASSESSED`, đồng thời chưa có intensity từ panel.
+
+Vì vậy release này **không** khởi chạy hoặc promote một lần retrain production.
+Nạp checkpoint 254 output như Judge 113 output sẽ âm thầm đổi API contract và có
+nguy cơ biến descriptor không được catalog nhắc tới thành negative không đáng
+tin. Trình tự retrain đúng là:
+
+1. Review và version mapping ontology 254 → 113 một cách tường minh; giữ các
+   source term chưa map và không suy ra `ABSENT` từ mention bị thiếu.
+2. Commit sensory record đã review thành immutable Parquet snapshot 113 nhãn,
+   kèm provenance về cấu trúc, nguồn, license, stereo và assessment.
+3. Khóa một split connectivity/scaffold 60/10/15/15 rồi benchmark logistic,
+   Morgan, Chemprop và DeepChem trên cùng snapshot.
+4. Chỉ fit calibration trên calibration partition, chọn model bằng validation,
+   và chỉ mở locked test một lần cho so sánh cuối.
+5. Chỉ promote ensemble năm seed sau khi vượt gate metric, calibration,
+   applicability domain và prospective panel đã công bố.
+
+Trước khi vượt gate này, ứng dụng giữ Judge v1 và Char-LSTM v1 làm production
+baseline có thể rollback. Target matching của release này luôn minh bạch: output
+chưa calibration được hiển thị là score và không bao giờ được gắn strict match
+40/30.
 
 ## API
 
@@ -389,13 +432,26 @@ python train_deepchem_judge.py --legacy-baseline \
 # Model artifact candidate; không tự động promote
 python train_judge_v2.py --snapshot /private/path/data-version.parquet
 python train_creator_v2.py --snapshot /private/path/data-version.parquet \
-  --target-descriptors fruity,floral
+  --target-descriptors fruity,floral \
+  --target-score-benchmark /private/path/target-score-benchmark.npz
 ```
 
 Development split group theo connectivity InChIKey, sau đó dùng Murcko scaffold
 cho cấu trúc vòng hoặc Butina clustering cho cấu trúc acyclic. Random split chỉ
-dùng cho diagnostic. Calibration được fit trên dữ liệu validation và locked test
-không được dùng để chọn threshold.
+dùng cho diagnostic. Split bất biến gồm 60% train, 10% calibration, 15%
+validation và 15% locked test. Calibration/threshold chỉ fit trên calibration;
+early stopping chỉ dùng validation; locked test chỉ được đánh giá sau khi đã
+chọn model.
+
+Mỗi run Judge/Creator ghi `learning_curve.png`, lịch sử CSV/JSON, metrics, config,
+split metadata và SHA-256 checksum trong artifact directory bất biến. Promotion
+Creator còn yêu cầu benchmark conditional so với unconditional cùng ngân sách,
+bootstrap CI dương và coverage gate theo số target.
+
+AiZynthFinder là evidence adapter tùy chọn, không phải dependency runtime hay
+cam kết tổng hợp. Có thể cấu hình trong môi trường R&D bằng
+`SCENT_STUDIO_AIZYNTH_CONFIG`; nếu thiếu, API trả `NOT_CONFIGURED`. SAscore vẫn
+là heuristic riêng và không làm thay đổi điểm odor target-fit.
 
 Xem [Giao thức khoa học](docs/SCIENTIFIC_PROTOCOL.md) để biết schema provenance,
 panel protocol, benchmark metric, promotion gate, uncertainty, blind-panel

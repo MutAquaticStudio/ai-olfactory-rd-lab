@@ -57,6 +57,8 @@ export const copy = {
   modelOutput: 'Model output',
   technicalDetails: 'Technical details',
   targetProfile: 'Target odor profile',
+  targetLimit: (count: number) => `Select up to ${count} descriptors`,
+  insufficientEvidence: 'Insufficient evidence',
   diversity: 'Sampling diversity',
   generate: 'Generate candidates',
   stop: 'Stop run',
@@ -84,6 +86,14 @@ export const copy = {
   shortlist: 'Shortlisted candidates',
   reviewQueue: 'Review queue',
   targetFit: 'Target fit',
+  robustTargetFit: 'Conservative target fit',
+  strictMatch: 'Strict match',
+  relaxedMatch: 'Relaxed match — requested threshold not met',
+  requestedThreshold: 'Requested threshold',
+  appliedThreshold: 'Applied threshold',
+  uncertainty: 'Ensemble uncertainty',
+  synthesisEvidence: 'Retrosynthesis evidence',
+  synthesisNotConfigured: 'Route search is not configured in this runtime.',
   targetDescriptors: 'Target descriptors',
   supportingDescriptors: 'Supporting descriptors',
   emptyCandidates: 'Select one or more target descriptors, then generate a candidate set.',
@@ -160,6 +170,7 @@ export const copy = {
   modelVersion: 'Model version',
   datasetVersion: 'Dataset version',
   calibration: 'Calibration',
+  calibrated: 'Calibrated probability',
   reliability: 'Evidence domain',
   nearestSimilarity: 'Nearest training similarity',
   uncalibrated: 'Uncalibrated legacy output',
@@ -228,7 +239,11 @@ export const phaseCopy: Record<GenerationPhase, string> = {
   STEREO_ENUMERATION: 'Resolving stereoisomers',
   STEREO_REVIEW: 'Stereo variants require chemistry review',
   RANKING: 'Ranking target fit',
-  PREPARING_3D: 'Preparing 3D conformers'
+  PREPARING_3D: 'Preparing 3D conformers',
+  TARGET_SCORING: 'Scoring target alignment',
+  STRICT_MATCH: 'Applying strict target gate',
+  RELAXING_TARGET_GATE: 'Relaxing target gate with disclosure',
+  RETROSYNTHESIS: 'Searching retrosynthesis routes'
 };
 
 export const chemesthesis = new Set([

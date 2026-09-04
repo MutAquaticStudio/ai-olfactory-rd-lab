@@ -10,9 +10,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from olfactory.training.benchmark import (
+    build_benchmark_manifest,
+    load_immutable_manifest,
+    save_immutable_manifest,
+    split_from_payload,
+)
 from olfactory.training.dataset import load_legacy_baseline, load_versioned_snapshot
 from olfactory.training.judge_v2 import train_judge_v2
-from olfactory.training.splits import chemical_group_split
 from olfactory.resources import validate_resource_bundle
 
 
@@ -26,6 +31,7 @@ def parse_args():
     source.add_argument("--snapshot", type=Path, help="Versioned Parquet snapshot from Data intake")
     source.add_argument("--legacy-baseline", action="store_true", help="Reproduce the weak-label v1 baseline only")
     parser.add_argument("--artifact-root", type=Path, default=ROOT / "artifacts")
+    parser.add_argument("--split-manifest", type=Path)
     parser.add_argument("--dataset-version")
     parser.add_argument("--seeds", default="11,17,23,31,43")
     parser.add_argument("--intensity-weight", type=float, choices=(0.1, 0.3, 1.0), default=0.3)
@@ -61,15 +67,17 @@ def main() -> None:
             "No assessed targets passed the configured panel/stereo gates. "
             "Collect replicated panel observations or use --allow-pre-panel-data for a diagnostic run."
         )
-    split = chemical_group_split(
-        table.smiles,
-        np.nan_to_num(table.presence, nan=0.0),
-        seed=42,
-    )
-    split_dir = args.artifact_root / "splits"
-    split_dir.mkdir(parents=True, exist_ok=True)
-    split_path = split_dir / f"{dataset_version}-{split.split_hash[:12]}.json"
-    split_path.write_text(json.dumps(split.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    if args.split_manifest:
+        split_payload = load_immutable_manifest(args.split_manifest, table=table)
+    else:
+        split_payload = build_benchmark_manifest(
+            table,
+            dataset_version=dataset_version,
+            seed=42,
+        )
+        split_path = args.artifact_root / "splits" / f"{dataset_version}-60-10-15-15.json"
+        save_immutable_manifest(split_path, split_payload)
+    split = split_from_payload(split_payload)
 
     manifests = []
     for seed in [int(value) for value in args.seeds.split(",") if value.strip()]:

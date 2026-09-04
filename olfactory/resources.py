@@ -14,6 +14,8 @@ from rdkit import Chem, rdBase
 
 from .features import canonical_isomeric_smiles
 from .models import ODOR_LABEL_COUNT, OdorPredictor, SMILES_LSTM, select_device
+from .target_matching import DescriptorEvidence, descriptor_evidence_from_payload
+from .training.creator_v2 import ConditionalSELFIESTransformer
 
 
 PAD_TOKEN = "<PAD>"
@@ -128,6 +130,22 @@ def load_training_fingerprints(dataset_path: Path) -> torch.Tensor:
     return features.detach().to(dtype=torch.bool, device="cpu")
 
 
+def load_label_positive_support(dataset_path: Path) -> Tuple[int, ...]:
+    """Return positive counts without interpreting catalog zeros as assessed negatives."""
+    dataset = torch.load(dataset_path, map_location="cpu", weights_only=False)
+    tensors = getattr(dataset, "tensors", None)
+    if not tensors or len(tensors) < 2:
+        raise ValueError("The odor dataset must expose X and Y tensors")
+    labels = tensors[1]
+    if (
+        not isinstance(labels, torch.Tensor)
+        or labels.ndim != 2
+        or labels.shape[1] != ODOR_LABEL_COUNT
+    ):
+        raise ValueError("The odor dataset must expose a [N, 113] label tensor")
+    return tuple(int(value) for value in (labels > 0).sum(dim=0).tolist())
+
+
 def load_smiles_model(
     vocab_path: Path,
     weights_path: Path,
@@ -151,6 +169,43 @@ def load_smiles_model(
     model.load_state_dict(state_dict)
     model.to(select_device()).eval()
     return model, char_to_idx, idx_to_char
+
+
+def load_conditioned_smiles_model(
+    weights_path: Path,
+) -> Tuple[ConditionalSELFIESTransformer, Tuple[str, ...]]:
+    """Load a promoted masked-condition SELFIES artifact."""
+    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
+    tokens = tuple(str(value) for value in checkpoint.get("tokens", ()))
+    if not tokens or len(set(tokens)) != len(tokens):
+        raise ValueError("Conditional Creator artifact has an invalid vocabulary")
+    condition_size = int(checkpoint.get("condition_size", 0))
+    if condition_size != 455:
+        raise ValueError("Conditional Creator artifact does not use condition schema v2")
+    architecture = checkpoint.get("architecture", {})
+    model = ConditionalSELFIESTransformer(
+        len(tokens),
+        condition_size=condition_size,
+        d_model=int(architecture.get("d_model", 256)),
+        nhead=int(architecture.get("heads", 8)),
+        layers=int(architecture.get("layers", 6)),
+    )
+    model.load_state_dict(checkpoint["state_dict"])
+    model.to(select_device()).eval()
+    return model, tokens
+
+
+def load_descriptor_evidence(
+    path: Path,
+    label_names: Sequence[str],
+) -> Tuple[DescriptorEvidence, ...]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("Descriptor evidence must be a JSON list")
+    records = descriptor_evidence_from_payload(payload)
+    if tuple(item.name for item in records) != tuple(str(name) for name in label_names):
+        raise ValueError("Descriptor evidence label order does not match the model")
+    return records
 
 
 def load_existing_isomeric_smiles_set(dataset_path: Path) -> Set[str]:

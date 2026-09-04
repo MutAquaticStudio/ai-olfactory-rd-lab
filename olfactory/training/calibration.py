@@ -1,4 +1,4 @@
-"""Validation-only Platt calibration with prevalence-tier fallback."""
+"""Calibration-partition Platt scaling with prevalence-tier fallback."""
 
 from __future__ import annotations
 

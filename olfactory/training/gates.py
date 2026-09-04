@@ -102,11 +102,20 @@ def creator_promotion_gate(
     ood_not_increased: bool,
     blind_panel_effect_ci_lower: Optional[float],
 ) -> PromotionDecision:
+    target_count = int(benchmark.get("targets_per_profile", 0))
+    required_coverage = {1: 0.80, 2: 0.60, 3: 0.40}.get(target_count, 1.0)
+    observed_coverage = benchmark.get("runs_with_three_strict")
     checks = (
         GateCheck("validity", benchmark.get("validity", 0.0) >= 0.98, benchmark.get("validity"), ">= 0.98"),
         GateCheck("canonical_uniqueness", benchmark.get("canonical_uniqueness", 0.0) >= 0.90, benchmark.get("canonical_uniqueness"), ">= 0.90"),
         GateCheck("chemistry_pass_rate", benchmark.get("chemistry_pass_rate", 0.0) >= 0.70, benchmark.get("chemistry_pass_rate"), ">= 0.70"),
         GateCheck("target_enrichment", target_enrichment_ci_lower is not None and target_enrichment_ci_lower > 0, target_enrichment_ci_lower, "bootstrap 95% CI lower bound > 0"),
+        GateCheck(
+            "strict_top3_coverage",
+            observed_coverage is not None and float(observed_coverage) >= required_coverage,
+            float(observed_coverage) if observed_coverage is not None else None,
+            f">= {required_coverage:.2f} for {target_count or 'unknown'} target(s)",
+        ),
         GateCheck("diversity_retention", diversity_not_degraded, float(diversity_not_degraded), "must not degrade"),
         GateCheck("ood_control", ood_not_increased, float(ood_not_increased), "must not increase materially"),
         GateCheck("blind_panel", blind_panel_effect_ci_lower is not None and blind_panel_effect_ci_lower > 0, blind_panel_effect_ci_lower, "prospective effect 95% CI lower bound > 0"),

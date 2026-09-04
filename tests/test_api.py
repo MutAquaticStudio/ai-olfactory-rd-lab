@@ -25,6 +25,7 @@ from olfactory.references import (
     ReferenceStatus,
     ReferenceVerifier,
 )
+from olfactory.target_matching import descriptor_evidence
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -106,7 +107,12 @@ def test_health_and_meta_expose_stable_contract():
         "max_seconds": 120.0,
         "max_event_lines": 30,
         "candidate_stereo_limit": 4,
+        "max_target_descriptors": 3,
+        "target_score_pool_size": 64,
     }
+    assert body["target_matching"]["requested_target_floor"] == 0.30
+    assert body["target_matching"]["requested_fit_floor"] == 0.40
+    assert len(body["target_matching"]["descriptors"]) == 113
     assert body["stereo"] == {
         "analysis_option_limit": 16,
         "candidate_variant_limit": 4,
@@ -278,6 +284,55 @@ def test_generation_requires_consent_without_network_call():
     assert resources.pubchem_client.calls == []
 
 
+def test_generation_rejects_more_than_three_or_duplicate_targets():
+    resources = make_resources()
+    labels = list(resources.label_names[:4])
+    with TestClient(create_app(resources=resources)) as client:
+        too_many = client.post(
+            "/api/v1/candidates/stream",
+            json={
+                "target_descriptors": labels,
+                "sampling_diversity": 0.8,
+                "reference_consents": ["PUBCHEM"],
+            },
+        )
+        duplicate = client.post(
+            "/api/v1/candidates/stream",
+            json={
+                "target_descriptors": [labels[0], labels[0]],
+                "sampling_diversity": 0.8,
+                "reference_consents": ["PUBCHEM"],
+            },
+        )
+
+    assert too_many.status_code == 422
+    assert duplicate.status_code == 422
+    assert duplicate.json()["detail"]["code"] == "DUPLICATE_TARGET_DESCRIPTOR"
+    assert resources.pubchem_client.calls == []
+
+
+def test_generation_rejects_insufficient_evidence_target_before_network():
+    resources = make_resources()
+    resources.descriptor_evidence = descriptor_evidence(
+        resources.label_names,
+        [0] * len(resources.label_names),
+        [0] * len(resources.label_names),
+    )
+    with TestClient(create_app(resources=resources)) as client:
+        response = client.post(
+            "/api/v1/candidates/stream",
+            json={
+                "target_descriptors": [resources.label_names[0]],
+                "sampling_diversity": 0.8,
+                "reference_consents": ["PUBCHEM"],
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "TARGET_DESCRIPTOR_NOT_SELECTABLE"
+    assert resources.pubchem_client.calls == []
+
+
 def test_generation_requires_consent_for_every_enabled_external_provider():
     resources = make_resources()
     catalog = RecordingExternalCatalog()
@@ -329,7 +384,7 @@ def test_generation_stream_orders_progress_before_completion(monkeypatch):
             reached_time_limit=False,
         )
 
-    monkeypatch.setattr(api_module, "generate_candidate_pool", fake_pool)
+    monkeypatch.setattr(api_module, "generate_target_aligned_pool", fake_pool)
     with TestClient(create_app(resources=resources)) as client:
         response = client.post(
             "/api/v1/candidates/stream",
@@ -390,7 +445,7 @@ def test_generation_completion_exposes_reference_review_evidence(monkeypatch):
             reference_unverified=1,
         )
 
-    monkeypatch.setattr(api_module, "generate_candidate_pool", fake_pool)
+    monkeypatch.setattr(api_module, "generate_target_aligned_pool", fake_pool)
     with TestClient(create_app(resources=resources)) as client:
         response = client.post(
             "/api/v1/candidates/stream",

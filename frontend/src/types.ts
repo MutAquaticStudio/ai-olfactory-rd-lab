@@ -216,6 +216,15 @@ export interface AppMeta {
     max_seconds: number;
     max_event_lines: number;
     candidate_stereo_limit: number;
+    max_target_descriptors: number;
+    target_score_pool_size: number;
+  };
+  target_matching: {
+    requested_target_floor: number;
+    requested_fit_floor: number;
+    relaxation_step: number;
+    policy: string;
+    descriptors: TargetDescriptorMeta[];
   };
   conformer_ensemble: {
     normal_sampling_count: number;
@@ -250,6 +259,18 @@ export interface AppMeta {
 }
 
 export type PresenceState = 'PRESENT' | 'ABSENT' | 'UNASSESSED';
+
+export type DescriptorMaturity = 'SUPPORTED' | 'LIMITED_EVIDENCE' | 'INSUFFICIENT';
+
+export interface TargetDescriptorMeta {
+  name: string;
+  positive_support: number;
+  assessed_negative_support: number;
+  maturity: DescriptorMaturity;
+  decision_threshold: number;
+  calibration_method: string;
+  selectable: boolean;
+}
 
 export interface PredictionV2 {
   model_version: string;
@@ -340,7 +361,11 @@ export type GenerationPhase =
   | 'STEREO_ENUMERATION'
   | 'STEREO_REVIEW'
   | 'RANKING'
-  | 'PREPARING_3D';
+  | 'PREPARING_3D'
+  | 'TARGET_SCORING'
+  | 'STRICT_MATCH'
+  | 'RELAXING_TARGET_GATE'
+  | 'RETROSYNTHESIS';
 
 export interface GenerationEvent {
   phase: GenerationPhase;
@@ -370,6 +395,46 @@ export interface RankedCandidate {
   novelty: { status: string; cids: number[]; error_code: string | null };
   reference_checks: ReferenceEvidence[];
   reference_gate: ReferenceGate;
+  target_match: {
+    target_fit: number;
+    robust_target_fit: number;
+    requested_fit_floor: number;
+    applied_fit_floor: number;
+    relaxation_factor: number;
+    tier: 'STRICT' | 'RELAXED';
+    met_requested_gate: boolean;
+    calibrated: boolean;
+    uses_absolute_probability_gate: boolean;
+    targets: Array<{
+      name: string;
+      probability: number;
+      uncertainty: number;
+      conservative_probability: number;
+      maturity: DescriptorMaturity;
+      requested_floor: number;
+      applied_floor: number;
+      passed_requested_floor: boolean;
+      passed_applied_floor: boolean;
+    }>;
+  } | null;
+  training_similarity: number | null;
+  reliability_state: 'IN_DOMAIN' | 'LIMITED_EVIDENCE' | 'OUT_OF_DOMAIN';
+  prediction_provenance?: {
+    model_version: string | null;
+    dataset_version: string | null;
+    calibration_version: string | null;
+  };
+  synthesis_assessment: {
+    status: string;
+    method: string;
+    time_limit_seconds: number;
+    route_found: boolean | null;
+    route_steps: number | null;
+    search_time_seconds: number | null;
+    precursor_coverage?: number | null;
+    warnings: string[];
+  };
+  academic_evidence: AcademicEvidenceSummary | null;
 }
 
 export interface ReviewCandidate {
@@ -398,6 +463,8 @@ export interface GenerationComplete {
     elapsed_seconds: number;
     reached_attempt_limit: boolean;
     reached_time_limit: boolean;
+    strict_matches: number;
+    relaxed_matches: number;
   };
 }
 

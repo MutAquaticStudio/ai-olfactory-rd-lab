@@ -21,9 +21,10 @@ class SplitManifest:
     test_indices: Tuple[int, ...]
     group_ids: Tuple[str, ...]
     seed: int
-    ratios: Tuple[float, float, float]
+    ratios: Tuple[float, ...]
     similarity_threshold: float
     split_hash: str
+    calibration_indices: Tuple[int, ...] = ()
 
     def to_dict(self) -> Dict[str, object]:
         payload = asdict(self)
@@ -52,7 +53,7 @@ def _fingerprint(molecule: Chem.Mol):
     generator = rdFingerprintGenerator.GetMorganGenerator(
         radius=2,
         fpSize=2048,
-        includeChirality=False,
+        includeChirality=True,
     )
     return generator.GetFingerprint(molecule)
 
@@ -135,7 +136,7 @@ def chemical_groups(
 def _greedy_assign_groups(
     groups: Dict[str, List[int]],
     labels: np.ndarray,
-    ratios: Tuple[float, float, float],
+    ratios: Tuple[float, ...],
     seed: int,
 ) -> Dict[str, int]:
     rng = np.random.default_rng(seed)
@@ -143,8 +144,9 @@ def _greedy_assign_groups(
     total_labels = labels.sum(axis=0).astype(float)
     target_rows = np.asarray(ratios, dtype=float) * total_rows
     target_labels = np.asarray(ratios, dtype=float)[:, None] * total_labels[None, :]
-    current_rows = np.zeros(3, dtype=float)
-    current_labels = np.zeros((3, labels.shape[1]), dtype=float)
+    split_count = len(ratios)
+    current_rows = np.zeros(split_count, dtype=float)
+    current_labels = np.zeros((split_count, labels.shape[1]), dtype=float)
 
     prevalence = np.maximum(total_labels, 1.0)
     ordering = []
@@ -157,7 +159,7 @@ def _greedy_assign_groups(
     assignment: Dict[str, int] = {}
     for key, indices, group_labels, _, _ in ordering:
         scores = []
-        for split in range(3):
+        for split in range(split_count):
             rows_after = current_rows.copy()
             labels_after = current_labels.copy()
             rows_after[split] += len(indices)
@@ -183,25 +185,36 @@ def _greedy_assign_groups(
     return assignment
 
 
-def chemical_group_split(
+def _build_group_split(
     smiles: Sequence[str],
     labels: np.ndarray,
     *,
-    ratios: Tuple[float, float, float] = (0.70, 0.15, 0.15),
-    seed: int = 42,
-    similarity_threshold: float = 0.6,
+    ratios: Tuple[float, ...],
+    names: Tuple[str, ...],
+    seed: int,
+    similarity_threshold: float,
 ) -> SplitManifest:
-    labels = np.asarray(labels, dtype=float)
-    if labels.ndim != 2 or labels.shape[0] != len(smiles):
+    matrix = np.asarray(labels, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[0] != len(smiles):
         raise ValueError("Labels must be a two-dimensional matrix aligned with SMILES")
-    if len(ratios) != 3 or any(value <= 0 for value in ratios) or not np.isclose(sum(ratios), 1.0):
-        raise ValueError("Split ratios must contain three positive values summing to one")
+    if (
+        len(ratios) != len(names)
+        or any(value <= 0 for value in ratios)
+        or not np.isclose(sum(ratios), 1.0)
+    ):
+        raise ValueError("Split ratios must be positive, named, and sum to one")
+
     group_ids, connectivity_keys = chemical_groups(smiles, similarity_threshold)
     grouped: Dict[str, List[int]] = {}
     for index, group_id in enumerate(group_ids):
         grouped.setdefault(group_id, []).append(index)
-    assignment = _greedy_assign_groups(grouped, np.nan_to_num(labels, nan=0.0), ratios, seed)
-    splits = [[], [], []]
+    assignment = _greedy_assign_groups(
+        grouped,
+        np.nan_to_num(matrix, nan=0.0),
+        ratios,
+        seed,
+    )
+    splits = [[] for _ in names]
     for index, group_id in enumerate(group_ids):
         splits[assignment[group_id]].append(index)
 
@@ -214,26 +227,76 @@ def chemical_group_split(
         raise RuntimeError(f"Connectivity leakage detected for {len(leaked)} groups")
 
     stable = {
-        "train": sorted(splits[0]),
-        "validation": sorted(splits[1]),
-        "test": sorted(splits[2]),
-        "group_ids": list(group_ids),
-        "seed": seed,
-        "ratios": list(ratios),
-        "similarity_threshold": similarity_threshold,
+        name: sorted(splits[position])
+        for position, name in enumerate(names)
     }
+    stable.update(
+        {
+            "group_ids": list(group_ids),
+            "seed": seed,
+            "ratios": list(ratios),
+            "partition_order": list(names),
+            "similarity_threshold": similarity_threshold,
+        }
+    )
     split_hash = hashlib.sha256(
         json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return SplitManifest(
-        tuple(stable["train"]),
-        tuple(stable["validation"]),
-        tuple(stable["test"]),
-        group_ids,
-        seed,
-        ratios,
-        similarity_threshold,
-        split_hash,
+        train_indices=tuple(stable["train"]),
+        validation_indices=tuple(stable["validation"]),
+        test_indices=tuple(stable["test"]),
+        group_ids=group_ids,
+        seed=seed,
+        ratios=ratios,
+        similarity_threshold=similarity_threshold,
+        split_hash=split_hash,
+        calibration_indices=tuple(stable.get("calibration", [])),
+    )
+
+
+def chemical_group_split(
+    smiles: Sequence[str],
+    labels: np.ndarray,
+    *,
+    ratios: Tuple[float, float, float] = (0.70, 0.15, 0.15),
+    seed: int = 42,
+    similarity_threshold: float = 0.6,
+) -> SplitManifest:
+    if len(ratios) != 3 or any(value <= 0 for value in ratios) or not np.isclose(sum(ratios), 1.0):
+        raise ValueError("Split ratios must contain three positive values summing to one")
+    return _build_group_split(
+        smiles,
+        labels,
+        ratios=ratios,
+        names=("train", "validation", "test"),
+        seed=seed,
+        similarity_threshold=similarity_threshold,
+    )
+
+
+def chemical_group_calibrated_split(
+    smiles: Sequence[str],
+    labels: np.ndarray,
+    *,
+    ratios: Tuple[float, float, float, float] = (0.60, 0.10, 0.15, 0.15),
+    seed: int = 42,
+    similarity_threshold: float = 0.6,
+) -> SplitManifest:
+    """Build train/calibration/validation/locked-test partitions.
+
+    Early stopping belongs to validation, probability calibration belongs to
+    calibration, and the locked test is evaluated only after model selection.
+    """
+    if len(ratios) != 4:
+        raise ValueError("Calibrated split requires train/calibration/validation/test ratios")
+    return _build_group_split(
+        smiles,
+        labels,
+        ratios=ratios,
+        names=("train", "calibration", "validation", "test"),
+        seed=seed,
+        similarity_threshold=similarity_threshold,
     )
 
 
