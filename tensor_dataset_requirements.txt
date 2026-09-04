@@ -1,2 +1,0 @@
-# Compatibility entry point retained for one release.
--r requirements.txt

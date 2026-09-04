@@ -159,6 +159,13 @@ cd frontend
 npm ci
 cd ..
 
+# Configure the private model bundle (not stored in Git)
+export SCENT_STUDIO_RESOURCE_DIR="$HOME/.scent-molecule-studio/resources"
+# Copy the three approved files into this directory, then create its checksum manifest:
+python scripts/prepare_resource_bundle.py \
+  --source /path/to/private/model-bundle \
+  --target "$SCENT_STUDIO_RESOURCE_DIR"
+
 PYTHON_BIN=.venv/bin/python ./run_local.sh
 ```
 
@@ -189,31 +196,45 @@ Vite proxies `/api` to the FastAPI process during development.
 
 ## Model resources
 
-The checked-in baseline application expects these resources in the repository
-root:
+The production application keeps model binaries outside Git in a private,
+checksum-verified resource bundle. Set `SCENT_STUDIO_RESOURCE_DIR` to the
+bundle directory before starting the API. The bundle contains:
+
+| Private resource | Contract |
+|---|---|
+| `odor_morgan_tensor_dataset.pt` | `X [3522, 2048]`, `Y [3522, 113]`, ordered labels |
+| `odor_predictor_weights.pth` | `2048 → 1024 → 512 → 113` descriptor model |
+| `smiles_creator_weights.pth` | Two-layer character LSTM weights |
+| `resource_manifest.json` | SHA-256 checksums for all private resources |
+
+Use `scripts/prepare_resource_bundle.py` to copy resources atomically and write
+the manifest. The loader verifies every checksum before loading a model; no
+model binary is downloaded automatically.
+
+The repository keeps only small, non-secret runtime metadata:
 
 | Resource | Contract |
 |---|---|
 | `clean_dataset.csv` | Local reference structures and catalog odor metadata |
-| `odor_morgan_tensor_dataset.pt` | `X [3522, 2048]`, `Y [3522, 113]`, ordered labels |
-| `odor_predictor_weights.pth` | `2048 → 1024 → 512 → 113` descriptor model |
 | `smiles_vocab.json` | Character vocabulary with `<PAD>` and `<END>` |
-| `smiles_creator_weights.pth` | Two-layer character LSTM weights |
 | `model_registry.json` | Active model/data/calibration metadata |
 
-The current weights are registered as a legacy scientific baseline. The web
-migration does not retrain or alter them. Candidate Judge v2 and Creator v2
-artifacts are written under ignored `artifacts/` paths and never overwrite the
-baseline files.
+The current private weights are registered as a legacy scientific baseline.
+The web migration does not retrain or alter them. Candidate Judge v2 and
+Creator v2 artifacts are written under ignored `artifacts/` paths and never
+overwrite the baseline bundle.
+
+If the resource bundle is missing or a checksum does not match, `run_local.sh`
+stops with a setup message and the API health endpoint reports a stable
+resource error. Keep the bundle in a private location and do not commit it.
 
 The current local clean-master experiment is stored as non-production
 artifacts under `artifacts/judge/clean-master-leakage-v2/` and
 `artifacts/creator/clean-master-char-lstm-v1/`. The Judge candidate has 254
 taxonomy outputs and a BatchNorm MLP, so it is intentionally not loadable by
 the 113-output production adapter. Its manifest and checksums are retained for
-benchmarking and rollback-safe review; do not copy it to
-`odor_predictor_weights.pth` without an audited 113-label snapshot and a
-passing quality gate.
+benchmarking and rollback-safe review; do not copy it into the private bundle
+without an audited 113-label snapshot and a passing quality gate.
 
 ## API
 
@@ -223,6 +244,9 @@ passing quality gate.
 | `GET /api/v1/meta` | Labels, limits, capabilities, versions, and providers |
 | `POST /api/v1/analysis` | Structure, stereo state, screen, prediction, and 3D |
 | `POST /api/v1/candidates/stream` | SSE candidate progress and completed ranking |
+| `POST /api/v1/academic/evidence/query` | Query local, citation-bound structure evidence |
+| `GET /api/v1/academic/evidence/{evidence_id}` | Retrieve one evidence record and provenance |
+| `GET /api/v1/academic/sources` | List indexed academic source records |
 | `GET /api/v1/data/templates` | Intake schema or CSV template |
 | `POST /api/v1/data/imports/validate` | Validate and stage a CSV/XLSX upload |
 | `POST /api/v1/data/imports/commit` | Commit a validated import token |
@@ -232,6 +256,28 @@ passing quality gate.
 
 Product errors use stable codes and plain-language messages. Technical details
 remain collapsed in the UI; API responses do not expose stack traces.
+
+## Academic evidence
+
+`academic_rag_pipeline.py ingest` now writes derived structure mentions to
+`faiss_academic_index/academic_evidence.jsonl` alongside the local FAISS
+batches. Each record retains the paper identifier, DOI/link, content hash,
+full-text versus abstract provenance, excerpt span, RDKit normalization log,
+and review state. Extraction is candidate generation only: records start as
+`UNREVIEWED`, odor descriptors remain `UNASSESSED`, and no raw PDF or abstract
+is imported into model training automatically.
+
+The evidence API only promotes an `EXACT_MATCH` after a reviewer accepts a
+stereo-aware RDKit identity with citation provenance. Name-only mentions,
+salts, unresolved stereochemistry, identifier conflicts, and abstract-only
+records remain reviewable rather than being treated as exact evidence. The
+default query excludes abstract fallback (`include_abstracts=false`).
+
+Academic retrieval is local-first and fail-closed. Open-access documents are
+temporary extraction inputs and are deleted after processing; no paywall is
+crossed and full text is not sent to an external service. A computational
+chemistry `PASS` or an academic identity match is not a safety, IFRA,
+synthesis, novelty, patent-clearance, or experimental-validation conclusion.
 
 ## Stereo and conformer policy
 
@@ -294,6 +340,11 @@ python3.12 -m venv .venv-training
 source .venv-training/bin/activate
 python -m pip install -r requirements-training.txt
 ```
+
+Legacy v1 training entrypoints and intermediate CSV exports are not part of
+the production checkout. The v2 benchmark scripts read the private tensor
+dataset from `SCENT_STUDIO_RESOURCE_DIR`; set that variable before running a
+legacy-baseline audit or benchmark.
 
 Core workflows:
 

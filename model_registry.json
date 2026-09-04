@@ -14,6 +14,7 @@
     "judge": {
       "architecture": "morgan-mlp-v1",
       "calibration_version": "uncalibrated",
+      "dataset_path": "odor_morgan_tensor_dataset.pt",
       "dataset_sha256": "078a0dee494baed433129f880c7a6f8832dd07fb0d98a26496def54392b0f078",
       "dataset_version": "legacy-clean-3522",
       "model_version": "judge-v1-legacy",

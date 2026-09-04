@@ -3,6 +3,14 @@ set -euo pipefail
 
 APP_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+RESOURCE_DIR="${SCENT_STUDIO_RESOURCE_DIR:-$HOME/.scent-molecule-studio/resources}"
+
+if [ ! -f "$RESOURCE_DIR/resource_manifest.json" ]; then
+  echo "Private model resources are not configured." >&2
+  echo "Prepare the bundle with: $PYTHON_BIN scripts/prepare_resource_bundle.py --source <resource-source> --target $RESOURCE_DIR" >&2
+  echo "Or set SCENT_STUDIO_RESOURCE_DIR to an existing bundle." >&2
+  exit 1
+fi
 
 "$PYTHON_BIN" - <<'PY'
 import sys

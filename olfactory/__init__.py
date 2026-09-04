@@ -10,6 +10,17 @@ from .generation import GenerationEvent, RankedCandidate
 from .pubchem import NoveltyResult, NoveltyStatus
 from .taxonomy import TaxonomyProfile
 from .prediction import EnsemblePredictor, LegacyMorganPredictor, MoleculePredictor, PredictionBatch
+from .academic_evidence import (
+    AcademicDocument,
+    AcademicEvidence,
+    AcademicEvidenceService,
+    AcademicEvidenceStore,
+    AcademicEvidenceSummary,
+    evidence_records_from_document,
+    extract_structure_mentions,
+    normalize_structure,
+    verify_academic_evidence,
+)
 
 __all__ = [
     "ChemicalDecision",
@@ -25,4 +36,13 @@ __all__ = [
     "MoleculePredictor",
     "LegacyMorganPredictor",
     "EnsemblePredictor",
+    "AcademicDocument",
+    "AcademicEvidence",
+    "AcademicEvidenceService",
+    "AcademicEvidenceStore",
+    "AcademicEvidenceSummary",
+    "evidence_records_from_document",
+    "extract_structure_mentions",
+    "normalize_structure",
+    "verify_academic_evidence",
 ]

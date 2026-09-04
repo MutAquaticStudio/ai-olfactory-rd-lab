@@ -2,6 +2,7 @@ import { ChevronDown } from 'lucide-react';
 import { copy } from '../copy';
 import type { AnalysisResult } from '../types';
 import ChemistryScreen from './ChemistryScreen';
+import AcademicEvidencePanel from './AcademicEvidencePanel';
 import Identifiers from './Identifiers';
 
 export default function Inspector({ result }: { result: AnalysisResult }) {
@@ -15,6 +16,7 @@ export default function Inspector({ result }: { result: AnalysisResult }) {
     <aside className="analysis-inspector">
       <section className="inspector-section"><h2>{copy.structuralIdentifiers}</h2><Identifiers isomeric={result.identifiers.isomeric_smiles} canonical={result.identifiers.canonical_smiles} /></section>
       <section className="inspector-section"><ChemistryScreen screen={result.chemistry_screen} descriptors={result.display_descriptors} /></section>
+      <section className="inspector-section"><AcademicEvidencePanel summary={result.academic_evidence ?? null} /></section>
       <details className="disclosure technical-disclosure"><summary>{copy.technicalDetails}<ChevronDown size={17} /></summary><div className="disclosure-body technical-copy">
         {integrity ? <dl className="integrity-grid">
           <div><dt>{copy.modelVersion}</dt><dd>{integrity.model_version}</dd></div>

@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-
 import torch
 from fastapi.testclient import TestClient
 from rdkit import Chem
@@ -69,12 +68,10 @@ class RecordingExternalCatalog:
 
 
 def make_resources():
-    dataset = torch.load(
-        ROOT / "odor_morgan_tensor_dataset.pt",
-        map_location="cpu",
-        weights_only=False,
+    mapping = json.loads(
+        (ROOT / "data" / "odor_taxonomy_mapping_v1_2.json").read_text(encoding="utf-8")
     )
-    labels = tuple(str(label) for label in dataset.label_names)
+    labels = tuple(str(label) for label in mapping["labels"])
     odor_model = OdorPredictor().eval()
     for parameter in odor_model.parameters():
         parameter.data.zero_()
@@ -147,6 +144,7 @@ def test_analysis_returns_structure_screen_predictions_and_taxonomy():
     assert len(body["prediction_v2"]["presence_predictions"]) == 113
     assert body["reference_checks"] == []
     assert body["reference_gate"]["status"] == "NOT_RUN"
+    assert body["academic_evidence"]["status"] == "NO_EXACT_EVIDENCE"
 
 
 def test_invalid_smiles_uses_stable_error_shape():

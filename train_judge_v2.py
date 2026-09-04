@@ -13,9 +13,11 @@ import torch
 from olfactory.training.dataset import load_legacy_baseline, load_versioned_snapshot
 from olfactory.training.judge_v2 import train_judge_v2
 from olfactory.training.splits import chemical_group_split
+from olfactory.resources import validate_resource_bundle
 
 
 ROOT = Path(__file__).resolve().parent
+RESOURCE_DIR = validate_resource_bundle()
 
 
 def parse_args():
@@ -38,12 +40,12 @@ def main() -> None:
     if args.legacy_baseline:
         table = load_legacy_baseline(
             ROOT / "clean_dataset.csv",
-            ROOT / "odor_morgan_tensor_dataset.pt",
+            RESOURCE_DIR / "odor_morgan_tensor_dataset.pt",
         )
         dataset_version = args.dataset_version or "legacy-clean-3522"
     else:
         dataset = torch.load(
-            ROOT / "odor_morgan_tensor_dataset.pt",
+            RESOURCE_DIR / "odor_morgan_tensor_dataset.pt",
             map_location="cpu",
             weights_only=False,
         )

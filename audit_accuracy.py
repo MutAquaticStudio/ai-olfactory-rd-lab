@@ -15,11 +15,13 @@ import torch
 from rdkit import Chem, rdBase
 
 from olfactory.models import OdorPredictor
+from olfactory.resources import validate_resource_bundle
 from olfactory.training.metrics import multilabel_metrics
 from olfactory.training.splits import chemical_group_split
 
 
 ROOT = Path(__file__).resolve().parent
+RESOURCE_DIR = validate_resource_bundle()
 
 
 def f1_at(targets: np.ndarray, probabilities: np.ndarray, threshold: float):
@@ -50,7 +52,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / "benchmarks" / "legacy-audit.json")
     args = parser.parse_args()
     frame = pd.read_csv(ROOT / "clean_dataset.csv")
-    dataset = torch.load(ROOT / "odor_morgan_tensor_dataset.pt", map_location="cpu", weights_only=False)
+    dataset = torch.load(RESOURCE_DIR / "odor_morgan_tensor_dataset.pt", map_location="cpu", weights_only=False)
     features, targets = dataset.tensors
     labels = tuple(str(name) for name in dataset.label_names)
     smiles_column = next(column for column in frame if column.lower() == "smiles")
@@ -79,7 +81,7 @@ def main() -> None:
     train_indices = permutation[:train_size]
     test_indices = permutation[train_size:]
     model = OdorPredictor()
-    model.load_state_dict(torch.load(ROOT / "odor_predictor_weights.pth", map_location="cpu", weights_only=True))
+    model.load_state_dict(torch.load(RESOURCE_DIR / "odor_predictor_weights.pth", map_location="cpu", weights_only=True))
     model.eval()
     with torch.inference_mode():
         probabilities = torch.sigmoid(model(features[test_indices].float())).numpy()
@@ -106,8 +108,8 @@ def main() -> None:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "inputs": {
             "clean_dataset_sha256": hashlib.sha256((ROOT / "clean_dataset.csv").read_bytes()).hexdigest(),
-            "tensor_dataset_sha256": hashlib.sha256((ROOT / "odor_morgan_tensor_dataset.pt").read_bytes()).hexdigest(),
-            "weights_sha256": hashlib.sha256((ROOT / "odor_predictor_weights.pth").read_bytes()).hexdigest(),
+            "tensor_dataset_sha256": hashlib.sha256((RESOURCE_DIR / "odor_morgan_tensor_dataset.pt").read_bytes()).hexdigest(),
+            "weights_sha256": hashlib.sha256((RESOURCE_DIR / "odor_predictor_weights.pth").read_bytes()).hexdigest(),
         },
         "data": {
             "molecules": len(frame),
