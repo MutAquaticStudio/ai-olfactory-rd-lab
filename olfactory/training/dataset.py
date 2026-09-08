@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -71,8 +72,50 @@ def load_versioned_snapshot(
     minimum_repeats: int = 2,
     minimum_presence_alpha: float = 0.5,
     minimum_intensity_icc: float = 0.5,
+    measurement_domain: Optional[dict] = None,
 ) -> MolecularTargetTable:
+    path = Path(snapshot_path)
+    manifest_path = path if path.suffix == ".json" else path.parent / "manifest.json"
+    if not manifest_path.exists() and path.with_suffix(".manifest.json").exists():
+        manifest_path = path.with_suffix(".manifest.json")
+    if manifest_path.exists():
+        metadata = json.loads(manifest_path.read_text())
+        if metadata.get("status") == "AUDIT_ONLY" or metadata.get("training_eligible") is False:
+            raise ValueError("AUDIT_ONLY evidence requires a reviewed training release")
+        if path.suffix == ".json":
+            raise ValueError("Supply the training Parquet path, not a manifest")
+        if metadata.get("parquet_sha256"):
+            from ..data_foundation.evidence import file_hash
+            if file_hash(path) != metadata["parquet_sha256"]:
+                raise ValueError("Training snapshot checksum mismatch")
     frame = _active_assessments(pd.read_parquet(snapshot_path))
+    required = {"assessment_id", "study_name", "session_name", "assessor_id", "inchikey", "descriptor",
+                "presence_state", "intensity", "replicate_number", "stereo_state", "isomeric_smiles"}
+    if not required <= set(frame):
+        raise ValueError("Snapshot is not a reviewed assessment table")
+    domain_fields = [name for name in ("study_name", "source_name", "source_version", "concentration",
+                                      "concentration_unit", "solvent", "temperature_c") if name in frame]
+    for name, value in (measurement_domain or {}).items():
+        if name not in domain_fields:
+            raise ValueError(f"Unknown measurement domain field: {name}")
+        frame = frame[frame[name].eq(value)]
+    if len(frame[domain_fields].drop_duplicates()) > 1:
+        raise ValueError("Select one measurement_domain; conditions cannot be pooled silently")
+    if frame.empty:
+        raise ValueError("No assessments in the selected measurement domain")
+    # Unresolved stereochemistry is excluded rather than assigned a random identity.
+    frame = frame[frame.stereo_state.isin(["DEFINED", "ACHIRAL"])].copy()
+    reliability = {}
+    for descriptor, observations in frame.groupby("descriptor"):
+        assessed = observations[observations.presence_state != "UNASSESSED"].copy()
+        unit_fields = ["inchikey", "session_name", "replicate_number"]
+        if assessed.duplicated(unit_fields + ["assessor_id"]).any():
+            raise ValueError("Duplicate active assessment in the same measurement context")
+        presence_matrix = assessed.assign(numeric=assessed.presence_state.map({"ABSENT": 0., "PRESENT": 1.})).pivot(
+            index=unit_fields, columns="assessor_id", values="numeric").to_numpy(dtype=float)
+        intensity_matrix = assessed[assessed.presence_state == "PRESENT"].pivot(
+            index=unit_fields, columns="assessor_id", values="intensity").to_numpy(dtype=float)
+        reliability[descriptor] = (krippendorff_alpha_nominal(presence_matrix), icc_2k(intensity_matrix))
     labels = tuple(str(name) for name in label_names)
     label_index = {name: index for index, name in enumerate(labels)}
     grouped = list(frame.groupby("inchikey", sort=True))
@@ -87,7 +130,7 @@ def load_versioned_snapshot(
     for molecule_row, (_, molecule_frame) in enumerate(grouped):
         first = molecule_frame.iloc[0]
         smiles.append(str(first["isomeric_smiles"]))
-        sources.append("private_panel")
+        sources.append(str(first.get("source_name", first["study_name"])))
         stereo_states.append(str(first["stereo_state"]))
         if str(first["stereo_state"]) == "UNRESOLVED":
             continue
@@ -98,20 +141,15 @@ def load_versioned_snapshot(
             if assessed.empty:
                 continue
             if strict_panel_gate:
-                assessor_counts = assessed.groupby("assessor_id").size()
+                assessor_counts = assessed.drop_duplicates(["assessor_id", "session_name", "replicate_number"]).groupby("assessor_id").size()
                 if len(assessor_counts) < minimum_assessors:
                     continue
                 if int((assessor_counts >= minimum_repeats).sum()) < minimum_assessors:
                     continue
-                presence_matrix = assessed.assign(
-                    presence_numeric=assessed["presence_state"].map({"ABSENT": 0.0, "PRESENT": 1.0})
-                ).pivot_table(
-                    index="replicate_number",
-                    columns="assessor_id",
-                    values="presence_numeric",
-                    aggfunc="last",
-                ).to_numpy(dtype=float)
-                alpha = krippendorff_alpha_nominal(presence_matrix)
+                sessions = assessed.groupby("assessor_id").session_name.nunique()
+                if int((sessions >= minimum_repeats).sum()) < minimum_assessors:
+                    continue
+                alpha = reliability[descriptor][0]
                 if not np.isfinite(alpha) or alpha < minimum_presence_alpha:
                     continue
             else:
@@ -125,13 +163,7 @@ def load_versioned_snapshot(
             ].dropna()
             if not present_intensity.empty:
                 if strict_panel_gate:
-                    intensity_matrix = assessed[assessed["presence_state"] == "PRESENT"].pivot_table(
-                        index="replicate_number",
-                        columns="assessor_id",
-                        values="intensity",
-                        aggfunc="last",
-                    ).to_numpy(dtype=float)
-                    intensity_icc = icc_2k(intensity_matrix)
+                    intensity_icc = reliability[descriptor][1]
                     intensity_reliability[molecule_row, label] = intensity_icc
                     if np.isfinite(intensity_icc) and intensity_icc >= minimum_intensity_icc:
                         intensity[molecule_row, label] = float(present_intensity.median())

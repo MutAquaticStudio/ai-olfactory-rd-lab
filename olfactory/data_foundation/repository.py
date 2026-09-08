@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 from .contracts import AssessmentInput, StandardizedMolecule
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
@@ -150,6 +150,18 @@ CREATE TABLE IF NOT EXISTS model_runs (
     metrics TEXT NOT NULL,
     artifact_manifest TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS evidence_sources (
+    source_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS evidence_records (
+    source_id TEXT NOT NULL REFERENCES evidence_sources(source_id),
+    record_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(source_id, record_id)
 );
 """
 
@@ -600,3 +612,37 @@ class SQLiteDataRepository:
                 "SELECT * FROM dataset_snapshots ORDER BY created_at DESC"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def insert_evidence_records(self, source: dict, records: Sequence[dict]) -> None:
+        """Append source observations without manufacturing a private-panel session."""
+        source_id = source["source_id"]
+        encode = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        with self.transaction() as connection:
+            previous = connection.execute("SELECT payload FROM evidence_sources WHERE source_id = ?", (source_id,)).fetchone()
+            payload = encode(source)
+            if previous is not None and previous[0] != payload:
+                raise ValueError("IMMUTABLE_SOURCE: use a new source version")
+            connection.execute("INSERT OR IGNORE INTO evidence_sources VALUES (?, ?, ?)", (source_id, payload, utc_now()))
+            for record in records:
+                existing = connection.execute(
+                    "SELECT payload FROM evidence_records WHERE source_id = ? AND record_id = ?",
+                    (source_id, record["record_id"]),
+                ).fetchone()
+                payload = encode(record)
+                if existing is not None and existing[0] != payload:
+                    raise ValueError("IMMUTABLE_RECORD: append a correction in a new source version")
+                connection.execute("INSERT OR IGNORE INTO evidence_records VALUES (?, ?, ?, ?)",
+                                   (source_id, record["record_id"], payload, utc_now()))
+            self.audit(connection, "EVIDENCE_IMPORTED", "evidence_source", source_id, {"record_count": len(records)})
+
+    def evidence_records(self, source_ids: Sequence[str]) -> tuple:
+        sources, records = [], []
+        with self.connect() as connection:
+            for source_id in sorted(set(source_ids)):
+                source = connection.execute("SELECT payload FROM evidence_sources WHERE source_id = ?", (source_id,)).fetchone()
+                if source is None:
+                    raise ValueError(f"Unknown evidence source: {source_id}")
+                sources.append(json.loads(source[0]))
+                rows = connection.execute("SELECT payload FROM evidence_records WHERE source_id = ? ORDER BY record_id", (source_id,)).fetchall()
+                records.extend({**json.loads(row[0]), "source_id": source_id} for row in rows)
+        return sources, records

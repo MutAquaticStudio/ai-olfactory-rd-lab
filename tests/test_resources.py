@@ -8,8 +8,12 @@ from olfactory.resources import (
     PRIVATE_RESOURCE_FILES,
     RESOURCE_MANIFEST_NAME,
     ResourceBundleError,
+    load_descriptor_evidence,
+    load_label_positive_support,
     validate_resource_bundle,
 )
+import torch
+from torch.utils.data import TensorDataset
 from olfactory.training.registry import ModelRegistry, sha256_file
 
 
@@ -126,3 +130,44 @@ def test_registry_rejects_dataset_outside_bundle(tmp_path):
         bundle,
         require_within_root=True,
     ) is False
+
+
+def test_label_support_counts_positives_without_calling_zeros_assessed_negatives(tmp_path):
+    dataset = TensorDataset(torch.zeros((3, 2048)), torch.zeros((3, 113)))
+    dataset.tensors[1][0, 0] = 1
+    dataset.tensors[1][1, 0] = 1
+    dataset.tensors[1][2, 4] = 1
+    dataset.label_names = [f"label-{index}" for index in range(113)]
+    path = tmp_path / "dataset.pt"
+    torch.save(dataset, path)
+
+    support = load_label_positive_support(path)
+
+    assert support[0] == 2
+    assert support[4] == 1
+    assert sum(support) == 3
+
+
+def test_descriptor_evidence_loader_requires_model_label_order(tmp_path):
+    path = tmp_path / "descriptor_evidence.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "floral",
+                    "positive_support": 80,
+                    "assessed_negative_support": 90,
+                    "maturity": "SUPPORTED",
+                    "decision_threshold": 0.31,
+                    "calibration_method": "per_label_platt",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    records = load_descriptor_evidence(path, ["floral"])
+
+    assert records[0].decision_threshold == pytest.approx(0.31)
+    with pytest.raises(ValueError, match="label order"):
+        load_descriptor_evidence(path, ["woody"])

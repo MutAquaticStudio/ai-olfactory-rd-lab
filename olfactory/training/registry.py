@@ -79,6 +79,9 @@ class ModelRegistry:
         # production v1 entries remain valid without it.
         calibration_path = entry.get("calibration_path")
         calibration_sha = entry.get("calibration_sha256")
+        calibration_version = entry.get("calibration_version")
+        if calibration_version not in {None, "", "uncalibrated"} and not calibration_path:
+            return False
         if calibration_path and calibration_sha:
             calibration = Path(str(calibration_path))
             if root is not None:
@@ -89,6 +92,23 @@ class ModelRegistry:
                 if require_within_root and not calibration.is_relative_to(root):
                     return False
             if not calibration.exists() or sha256_file(calibration) != calibration_sha:
+                return False
+        elif calibration_path:
+            return False
+        descriptor_path = entry.get("descriptor_evidence_path")
+        descriptor_sha = entry.get("descriptor_evidence_sha256")
+        if descriptor_path:
+            if not descriptor_sha:
+                return False
+            descriptor = Path(str(descriptor_path))
+            if root is not None:
+                if descriptor.is_absolute():
+                    descriptor = descriptor.resolve()
+                else:
+                    descriptor = (root / descriptor).resolve()
+                if require_within_root and not descriptor.is_relative_to(root):
+                    return False
+            if not descriptor.exists() or sha256_file(descriptor) != descriptor_sha:
                 return False
         return True
 

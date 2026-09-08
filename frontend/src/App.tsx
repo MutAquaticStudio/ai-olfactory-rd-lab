@@ -18,7 +18,7 @@ export default function App() {
     const controller = new AbortController();
     getMeta(controller.signal).then((nextMeta) => {
       setMeta(nextMeta);
-      setCandidateWorkspace((current) => current.initialized ? current : createCandidateWorkspace(nextMeta.label_names));
+      setCandidateWorkspace((current) => current.initialized ? current : createCandidateWorkspace(nextMeta));
     }).catch((requestError) => {
       if (!(requestError instanceof DOMException && requestError.name === 'AbortError')) setError(requestError);
     });

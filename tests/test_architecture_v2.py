@@ -43,6 +43,32 @@ def test_legacy_predictor_implements_common_contract():
     assert result.label_names[0] == "label-0"
 
 
+def test_legacy_predictor_applies_declared_calibration_artifact():
+    class Calibration:
+        def transform_logits(self, logits):
+            return np.full_like(logits, 0.73)
+
+    predictor = LegacyMorganPredictor(
+        OdorPredictor().eval(),
+        tuple(f"label-{i}" for i in range(113)),
+        identity=PredictionIdentity("v1-cal", "d1", "platt-v1", "CANDIDATE"),
+        calibration=Calibration(),
+    )
+
+    result = predictor.predict(["CCO"])
+
+    assert result.presence_probability[0, 0] == pytest.approx(0.73)
+
+
+def test_legacy_predictor_rejects_false_calibration_claim():
+    with pytest.raises(ValueError, match="calibration artifact"):
+        LegacyMorganPredictor(
+            OdorPredictor().eval(),
+            tuple(f"label-{i}" for i in range(113)),
+            identity=PredictionIdentity("v1-cal", "d1", "platt-v1", "CANDIDATE"),
+        )
+
+
 def test_ensemble_reports_mean_and_epistemic_spread():
     class Stub:
         label_names = tuple(f"label-{i}" for i in range(113))
@@ -105,6 +131,9 @@ def test_split_manifest_is_immutable_and_validated(tmp_path):
         stereo_state=("RESOLVED",) * 6,
     )
     payload = build_benchmark_manifest(table, dataset_version="test-v1", seed=4)
+    assert payload["schema_version"] == 2
+    assert payload["ratios"] == [0.6, 0.1, 0.15, 0.15]
+    assert "calibration_indices" in payload
     path = save_immutable_manifest(tmp_path / "split.json", payload)
     assert load_immutable_manifest(path, table=table)["dataset_version"] == "test-v1"
     with pytest.raises(FileExistsError):
@@ -134,3 +163,23 @@ def test_registry_requires_a_passing_quality_gate(tmp_path):
         registry.promote_after_gate("judge", entry, SimpleNamespace(eligible=False, blocked_reasons=("macro_ap",)))
     registry.promote_after_gate("judge", entry, SimpleNamespace(eligible=True, blocked_reasons=()))
     assert registry.production("judge")["status"] == "PRODUCTION"
+
+
+def test_registry_verifies_descriptor_evidence_artifact(tmp_path):
+    from olfactory.training.registry import ModelRegistry
+
+    weights = tmp_path / "weights.pth"
+    evidence = tmp_path / "descriptor_evidence.json"
+    weights.write_bytes(b"candidate")
+    evidence.write_text("[]", encoding="utf-8")
+    entry = {
+        "weights_path": weights.name,
+        "weights_sha256": sha256_file(weights),
+        "descriptor_evidence_path": evidence.name,
+        "descriptor_evidence_sha256": sha256_file(evidence),
+    }
+    registry = ModelRegistry(tmp_path / "registry.json")
+
+    assert registry.verify_entry(entry, tmp_path, require_within_root=True)
+    evidence.write_text("tampered", encoding="utf-8")
+    assert not registry.verify_entry(entry, tmp_path, require_within_root=True)

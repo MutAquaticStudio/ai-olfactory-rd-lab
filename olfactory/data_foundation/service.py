@@ -584,3 +584,18 @@ class DataFoundationService:
 
     def list_snapshots(self) -> List[Dict[str, object]]:
         return self.repository.list_snapshots()
+
+    def import_evidence_records(self, source: dict, records: Sequence[dict]) -> None:
+        from .evidence import validate_evidence_records
+        normalized = validate_evidence_records(source, records, self.label_names)
+        self.repository.insert_evidence_records(source, normalized)
+
+    def import_reviewed_catalog(self, artifact_dir: Path, *, csv_path: Path, alias_path: Path,
+                                review_path: Path, taxonomy_path: Path) -> str:
+        from .evidence import import_reviewed_catalog
+        return import_reviewed_catalog(self, artifact_dir, csv_path=csv_path, alias_path=alias_path,
+                                       review_path=review_path, taxonomy_path=taxonomy_path)
+
+    def create_evidence_snapshot(self, dataset_version: str, source_ids: Sequence[str]) -> dict:
+        from .evidence import publish_evidence_snapshot
+        return publish_evidence_snapshot(self, dataset_version, source_ids)

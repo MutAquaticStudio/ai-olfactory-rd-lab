@@ -25,6 +25,56 @@ The product keeps four kinds of evidence separate:
 It does not present generated structures as experimentally validated molecules
 or interpret a reference-source no-match as global novelty.
 
+## Judge data release status
+
+The reviewed catalog now has an immutable, checksum-verified release in the
+existing local Data Foundation: **4,729 molecules, 4,227 connectivity groups**.
+The audit split contains **2,818 / 483 / 717 / 711** molecules in
+train/calibration/validation/locked test, with zero connectivity/scaffold overlap.
+Cross-partition fingerprint similarity is reported separately.
+
+Keller 2016 has been imported locally as **1,430,000 source measurement rows**
+with original values and context. Dravnieks remains license-blocked. Public
+ratings await protocol/mapping review; they have not become training labels.
+All 113 target labels currently lack eligible assessed-negative support in the
+reviewed catalog release. **Production retraining/calibration remains blocked
+by the data gate.** Separate, explicitly exploratory CROWN and PU benchmarks
+have run without relaxing that gate or replacing production weights.
+
+[Reproduction commands, source decisions and next gates](docs/JUDGE_DATA_RELEASE.md).
+Judge v1 remains production and the existing v2 model remains shadow-only.
+
+### Latest PU retrain — 8 September 2026
+
+Eight runs compare linear Morgan and Morgan MLP with three PU prior assumptions
+and additional seeds for the validation-selected configuration. The source
+remains `AUDIT_ONLY`: unlabeled catalog entries are **not assessed negatives**.
+
+- 2,875 stereo-resolved structures; split **1,703 / 296 / 436 / 440**.
+- **57 of 113** output positions have enough training support; the other 56
+  are marked untrained, not presented as zero-probability descriptors.
+- Selected model: **MLP, prior offset 0, seed 42**, best epoch 100.
+- Test known-positive **recall@5 0.5687**, **recall@10 0.7658**, **MRR 0.8535**.
+- Training-frequency baseline recall@5: **0.4478**. Group-bootstrap delta
+  95% CI: **[+0.0684, +0.1776]**.
+- Recall@5 improvement over the validation-selected linear PU baseline is
+  **not statistically established**; seed 17 performs materially worse.
+
+![Latest exploratory PU Judge learning curve](docs/assets/judge-pu-113-release-learning-curve.png)
+
+Recall measures retrieval of **already recorded positive descriptors**, not
+sensory accuracy. Evaluation is retrospective, scores are uncalibrated, and
+this model is **not promoted**. Calibration and intensity remain not evaluable.
+The earlier clean-master learning curve below is retained as a different,
+historical benchmark and must not be compared by loss alone.
+
+[Method, all eight runs and limitations](docs/PU_JUDGE_EXPLORATORY.md).
+Raw data, checkpoints and weights stay in the private local artifact directory.
+
+```bash
+.venv-training/bin/python train_pu_exploratory.py --acknowledge-exploratory
+```
+
 ## Workspace
 
 ### Molecule analysis
@@ -47,21 +97,34 @@ then used by both the chiral fingerprint and conformer pipeline.
 
 ### Candidate design
 
-- Select one or more target descriptors and a sampling-diversity value.
+- Select up to three target descriptors and a sampling-diversity value.
+- Disable descriptors with insufficient assessed support; distinguish
+  `SUPPORTED` from `LIMITED_EVIDENCE` descriptors in the selector.
 - Stream generation and screening progress with a cancellable request.
 - Remove invalid, duplicate, unresolved, rejected, known, and unverified
   structures before ranking.
 - Auto-enumerate at most four stereo variants per candidate and keep at most one
   representative per connectivity.
-- Rank accepted candidates with the existing geometric target-fit score:
+- Score the chemistry-valid pool before PubChem, 3D, academic, or route work.
+  A promoted conditional SELFIES artifact receives selected targets plus
+  assessed/intensity masks; the current Char-LSTM remains a disclosed fallback.
+- Rank with an uncertainty-penalized geometric target-fit score:
 
 ```text
-Target fit = exp(mean(log(P(selected target descriptors))))
+conservative_i = max(0, ensemble_mean_i - 1.64 × ensemble_std_i)
+Robust target fit = exp(mean(log(conservative_i)))
 ```
 
-- Display the top three candidates with 2D/3D structure, descriptors, target
-  probabilities, supporting descriptors, chemistry evidence, and reference
-  evidence.
+- For calibrated `SUPPORTED` descriptors, a strict match requires every target
+  to reach 30% and robust target fit to reach 40%. Limited-evidence descriptors
+  use frozen calibration thresholds and are not presented as absolute 40/30
+  probabilities.
+- If fewer than three structures meet the requested gate, relax both floors in
+  transparent 0.05 steps. Every such result is marked `RELAXED`, records the
+  applied threshold, and states that the requested threshold was not met.
+- Display up to three candidates with 2D/3D structure, descriptors, target
+  evidence, uncertainty, applicability domain, reference evidence, academic
+  citations, Ertl SAscore, and optional AiZynthFinder route evidence.
 - Keep chemistry and reference-review items outside the shortlist.
 
 The loop stops at five accepted structures, 200 attempts, or 120 seconds.
@@ -105,7 +168,7 @@ flowchart LR
 
 ### Accuracy-first training architecture
 
-The web process never imports DeepChem or Chemprop.  Both the legacy Morgan
+The normal web process does not import DeepChem or Chemprop. Both the legacy Morgan
 baseline and future graph models implement the same `MoleculePredictor` /
 `PredictionBatch` contract (`olfactory/prediction.py`).  The registered Judge
 v1 remains production until a candidate passes the locked chemical-group test,
@@ -124,7 +187,7 @@ source .venv-training/bin/activate
 python -m pip install -r requirements-deepchem.txt
 ```
 
-Create the shared 70/15/15 split once and reuse its checksum for every model:
+Create the shared 60/10/15/15 split once and reuse its checksum for every model:
 
 ```bash
 python build_split_manifest.py --legacy-baseline
@@ -134,7 +197,19 @@ python benchmark_baselines.py --legacy-baseline \
 
 Stereo variants are grouped by connectivity InChIKey; cyclic structures are
 grouped by Murcko scaffold and acyclic structures by Butina Morgan similarity.
-Random splits are diagnostic only.  The locked test is never used for tuning.
+Random splits are diagnostic only. Early stopping uses validation; probability
+calibration and descriptor thresholds use only the dedicated calibration
+partition; the locked test is never used for tuning.
+
+An optional five-seed Chemprop ensemble can be loaded in shadow mode from its
+checksummed manifest. It appears only under **Molecule analysis → Technical
+details** and is never used for candidate ranking. Because this requires
+Chemprop classes, start the app with the training interpreter when enabling it:
+
+```bash
+export SCENT_STUDIO_JUDGE_SHADOW_MANIFEST=/absolute/path/to/ensemble_manifest.json
+PYTHON_BIN=.venv-training/bin/python ./run_local.sh
+```
 
 ## Requirements
 
@@ -259,6 +334,44 @@ These values describe a 254-label weak-taxonomy candidate, not the registered
 113-label production model. They are retained as reproducible training evidence
 and do not satisfy the promotion gate by themselves.
 
+### Retraining readiness
+
+Preflight on 2026-09-04 found 4,729 unique Isomeric SMILES in the private
+`clean_master_olfactory_db.csv`. Its `odor_types` and `odor_descriptors` fields
+currently expand to 254 weak-taxonomy labels, while the production prediction
+contract requires exactly 113 ordered descriptors. The catalog also records
+mentions rather than reviewed `PRESENT / ABSENT / UNASSESSED` assessments and
+does not contain panel intensity measurements.
+
+The project-owner review now recognizes all 117 previously unresolved entries
+as valid Osmo v1.2 source-taxonomy vocabulary: 5 grand families, 28
+subfamilies, 64 descriptors, 11 textures, and 9 sensations. They are retained
+as `SOURCE_TAXONOMY_ONLY`, not collapsed into the fixed 113 training targets.
+The mapping review queue is therefore empty, but the snapshot remains
+non-trainable because catalog omissions are still `UNASSESSED` and no reviewed
+panel intensity exists.
+
+For those reasons, this release does **not** launch or promote a production
+retraining run. Reusing the existing 254-output checkpoint as if it were the
+113-output Judge would silently change the API contract and convert missing
+catalog mentions into unreliable negatives. The correct retraining sequence is:
+
+1. Review and version an explicit 254-to-113 ontology mapping; preserve
+   unmapped source terms and do not infer `ABSENT` from a missing mention.
+2. Commit reviewed sensory records to an immutable 113-label Parquet snapshot
+   with structure, source, license, stereo, and assessment provenance.
+3. Freeze one 60/10/15/15 connectivity/scaffold split and run the logistic,
+   Morgan, Chemprop, and DeepChem candidates on the same snapshot.
+4. Fit calibration only on the calibration partition, select with validation,
+   and open the locked test once for the final comparison.
+5. Promote a five-seed ensemble only after the documented metric, calibration,
+   applicability-domain, and prospective-panel gates pass.
+
+Until that gate is met, the application keeps Judge v1 and Char-LSTM v1 as the
+rollback-safe production baseline. Target matching from this release remains
+transparent: uncalibrated output is shown as a score and can never be labeled a
+strict 40/30 match.
+
 ## API
 
 | Endpoint | Purpose |
@@ -375,26 +488,94 @@ Core workflows:
 # Audit the legacy weak-label baseline
 python audit_accuracy.py
 
-# Fixed grouped-split baselines
-python benchmark_baselines.py --snapshot /private/path/data-version.parquet
+# Apply the owner-approved taxonomy-only review without forcing target labels
+python build_master_label_review.py \
+  --data /private/path/clean_master_olfactory_db.csv \
+  --review-policy data/odor_label_review_v1.json \
+  --output artifacts/data/clean-master-113-reviewed-v1 \
+  --dataset-version clean-master-113-reviewed-v1
 
-# Grouped CV for Judge v2
-python benchmark_judge_v2.py --snapshot /private/path/data-version.parquet
+# Fixed grouped-split baselines with row-aligned predictions
+python benchmark_baselines.py --legacy-baseline \
+  --split-manifest artifacts/benchmarks/legacy-113-split-v1.json
+
+# Grouped five-fold × three-seed CV for Judge v2
+python benchmark_judge_v2.py --legacy-baseline \
+  --split-manifest artifacts/benchmarks/legacy-113-split-v1.json
 
 # Optional DeepChem graph candidate (training environment only)
 python train_deepchem_judge.py --legacy-baseline \
   --split-manifest artifacts/benchmarks/split_manifest.json
 
-# Candidate model artifacts; never auto-promoted
-python train_judge_v2.py --snapshot /private/path/data-version.parquet
+# Five-seed calibrated shadow ensemble; never auto-promoted
+python train_judge_v2.py --legacy-baseline \
+  --split-manifest artifacts/benchmarks/legacy-113-split-v1.json \
+  --baseline-manifest artifacts/baselines/<run>/manifest.json
+
+# Resume ensemble assembly from five completed member manifests
+python build_judge_ensemble.py \
+  --split-manifest artifacts/benchmarks/legacy-113-split-v1.json \
+  --baseline-manifest artifacts/baselines/<run>/manifest.json \
+  --member-manifest artifacts/judge/<seed-1>/manifest.json \
+  --member-manifest artifacts/judge/<seed-2>/manifest.json \
+  --member-manifest artifacts/judge/<seed-3>/manifest.json \
+  --member-manifest artifacts/judge/<seed-4>/manifest.json \
+  --member-manifest artifacts/judge/<seed-5>/manifest.json
+
 python train_creator_v2.py --snapshot /private/path/data-version.parquet \
-  --target-descriptors fruity,floral
+  --target-descriptors fruity,floral \
+  --target-score-benchmark /private/path/target-score-benchmark.npz
 ```
 
 Development splits group by connectivity InChIKey, then Murcko scaffold for
 cyclic structures or Butina clustering for acyclic structures. Random split is
-diagnostic only. Calibration is fitted on validation data, and the locked test
-set is not used for threshold selection.
+diagnostic only. The immutable split is 60% training, 10% calibration, 15%
+validation, and 15% locked test. Calibration and descriptor thresholds use
+only the calibration partition; early stopping uses validation; the locked
+test is evaluated only after model selection.
+
+Judge and Creator runs write `learning_curve.png`, machine-readable CSV/JSON
+history, metrics, configuration, split metadata, and SHA-256 checksums into
+their immutable artifact directory. Creator promotion also requires an
+equal-budget conditional-versus-unconditional benchmark with positive
+bootstrap confidence and target-count coverage gates.
+
+### Judge v2 shadow result
+
+The five-seed run completed on the immutable 113-label chemical-group split.
+The test partition is explicitly marked `EXPOSED_RETROSPECTIVE_TEST` because
+earlier development had already inspected it; these results support shadow
+comparison, not production promotion.
+
+| Retrospective locked-test metric | Morgan baseline | Chemprop ensemble | Change |
+|---|---:|---:|---:|
+| Macro average precision | 0.3005 | 0.3457 | +15.0% |
+| Micro average precision | 0.3188 | 0.3702 | +16.1% |
+| Mean label ECE | 0.01325 | 0.01257 | improved |
+| Mean Brier score | 0.02652 | 0.02524 | improved |
+
+The grouped paired-bootstrap macro AP delta was `0.0406`, with 95% CI
+`[0.0274, 0.0577]`. Presence ranking and calibration gates passed. Promotion
+remains blocked because intensity is not evaluable, no prospective blind panel
+exists, the test was previously exposed, and the legacy labels still treat
+catalog omissions as negatives. The aggregate learning curve and
+machine-readable gate report remain in the private run artifact directory.
+
+The complete development benchmark also ran grouped five-fold cross-validation
+with three seeds (15 holdouts). Mean ± standard deviation was `0.3317 ± 0.0368`
+macro AP, `0.3670 ± 0.0254` micro AP, `0.01383 ± 0.00152` mean label ECE, and
+`0.02466 ± 0.00109` mean Brier score. These CV holdouts were never used for
+early stopping or calibration within their run.
+
+AiZynthFinder is an optional evidence adapter, not a runtime dependency or a
+synthesis guarantee. Configure it only in the training/R&D environment:
+
+```bash
+export SCENT_STUDIO_AIZYNTH_CONFIG=/private/path/to/aizynthfinder.yml
+```
+
+If it is absent, the API returns `NOT_CONFIGURED`; SAscore remains a separate
+heuristic and neither value changes the odor target-fit score.
 
 See [Scientific protocol](docs/SCIENTIFIC_PROTOCOL.md) for provenance schema,
 panel protocol, benchmark metrics, promotion gates, uncertainty, blind-panel

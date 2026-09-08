@@ -1,0 +1,51 @@
+{
+  "policy_version": "crown-source-encoding-mapping-v1",
+  "record_id": 15657278,
+  "record_version": "v3",
+  "review_actor": "Codex technical evidence review under user authorization",
+  "authorization": "Ok xác định , encoding, mapping và ktra điều kiện đo. Và training luôn",
+  "human_expert_approval": false,
+  "sample_identity_approved": false,
+  "training_eligible": false,
+  "encoding": {
+    "status": "RESOLVED_BY_PAPER_AND_AUTHOR_CODE",
+    "zero": "ABSENT_AT_TRIAL",
+    "one": "PRESENT_AT_TRIAL",
+    "missing": "UNASSESSED",
+    "basis": "Technical Validation describes the plotted statistic as percentage answering yes. Cells 21 and 26 of the pinned author notebook compute it as the mean of unchanged binary descriptor values. Therefore a one contributes a yes; a zero contributes a no. This is cross-source technical inference, not an author correspondence or a numeric codebook quotation.",
+    "paper": "https://doi.org/10.1038/s41597-025-04644-2",
+    "paper_section": "Technical Validation / Validity: Comparison with another laymen dataset; Figure 4 caption",
+    "notebook_sha256": "f3bc594a944f6276aba68bce0bb2ec5700fffaa7535e55d34687840efb001c9c",
+    "notebook_cells_zero_based": [21, 26]
+  },
+  "mappings": [
+    {"source": "sweet", "target": "sweet", "decision": "LITERAL", "reason": "Source descriptor, not intensity."},
+    {"source": "sour", "target": "sour", "decision": "LITERAL", "reason": "Not a chemical acidity measurement."},
+    {"source": "fruit", "target": "fruity", "decision": "BROAD_CATEGORY", "reason": "No inference of specific fruits; dictionary alias fruity is recorded here."},
+    {"source": "spices", "target": "spicy", "decision": "BROAD_CATEGORY", "reason": "No inference of cinnamon or trigeminal heat."},
+    {"source": "bakery", "target": null, "decision": "SOURCE_ONLY", "reason": "Not equivalent to bread, roasted or malty."},
+    {"source": "garlic", "target": "garlic", "decision": "LITERAL", "reason": "No propagation to sulfurous."},
+    {"source": "fish", "target": "fishy", "decision": "BROAD_CATEGORY", "reason": "Noun/adjective harmonization only."},
+    {"source": "burnt", "target": "burnt", "decision": "LITERAL", "reason": "No propagation to roasted or smoky."},
+    {"source": "decayed", "target": null, "decision": "SOURCE_ONLY", "reason": "Not equivalent to musty, fermented or sulfurous."},
+    {"source": "grass", "target": "grassy", "decision": "BROAD_CATEGORY", "reason": "Not all green descriptors."},
+    {"source": "wood", "target": "woody", "decision": "BROAD_CATEGORY", "reason": "No inference of specific woods."},
+    {"source": "chemical", "target": null, "decision": "SOURCE_ONLY", "reason": "Not equivalent to solvent or medicinal."},
+    {"source": "flower", "target": "floral", "decision": "BROAD_CATEGORY", "reason": "No inference of jasmine, rose or violet."},
+    {"source": "musky", "target": null, "decision": "SOURCE_ONLY", "reason": "Lay-panel descriptor is not automatically equivalent to the perfumery musk target."},
+    {"source": "sweaty", "target": null, "decision": "SOURCE_ONLY", "reason": "Not equivalent to animal, sour or cheesy."},
+    {"source": "ammonia/urinous", "target": null, "decision": "SOURCE_ONLY", "reason": "Compound descriptor; preserve dictionary typo ammonia/urinuos as provenance, not a target."}
+  ],
+  "context_policy": {
+    "pool_cohorts": false,
+    "pool_concentrations": false,
+    "main_repeat_sessions": 1,
+    "retest_sessions": 2,
+    "unmatched_set_action": "HOLD",
+    "patient_action": "SEPARATE_DOMAIN_HOLD",
+    "excluded_action": "EXCLUDE_FROM_TRAINING",
+    "racemate_or_unresolved_stereo_action": "HOLD_CHIRAL_TRAINING",
+    "global_intensity_is_descriptor_intensity": false,
+    "consensus": "NOT_RELEASED; assess agreement and repeat/context eligibility first"
+  }
+}

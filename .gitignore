@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 
 .venv/
+.venv-app/
+.venv-training/
 venv/
 env/
 

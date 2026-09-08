@@ -11,7 +11,11 @@ const meta: AppMeta = {
   label_names: ['jasmine', 'woody'],
   taxonomy_version: '1.2',
   projection_name: 'Osmo-compatible projection',
-  generation_limits: { required_candidates: 5, shortlist_count: 3, max_attempts: 200, max_seconds: 120, max_event_lines: 30, candidate_stereo_limit: 4 },
+  generation_limits: { required_candidates: 5, shortlist_count: 3, max_attempts: 200, max_seconds: 120, max_event_lines: 30, candidate_stereo_limit: 4, max_target_descriptors: 3, target_score_pool_size: 64 },
+  target_matching: { requested_target_floor: 0.3, requested_fit_floor: 0.4, relaxation_step: 0.05, policy: 'TEST', descriptors: [
+    { name: 'jasmine', positive_support: 20, assessed_negative_support: 0, maturity: 'LIMITED_EVIDENCE', decision_threshold: 0.2, calibration_method: 'rare_tier_platt', selectable: true },
+    { name: 'woody', positive_support: 80, assessed_negative_support: 80, maturity: 'SUPPORTED', decision_threshold: 0.3, calibration_method: 'per_label_platt', selectable: true }
+  ] },
   conformer_ensemble: { normal_sampling_count: 50, macrocycle_sampling_count: 100, max_displayed: 5, normal_cluster_rmsd: 0.75, macrocycle_cluster_rmsd: 1, cache_size: 128 },
   stereo: { analysis_option_limit: 16, candidate_variant_limit: 4 },
   capabilities: { structure_2d: true, conformer_3d: true },
@@ -42,7 +46,8 @@ vi.mock('../pages/CandidatesPage', async (importOriginal) => {
             summary: {
               attempts: 1, accepted: 1, reviews: 0, invalid: 0, duplicates: 0, rejected: 0,
               found: 0, unverified: 0, reference_matches: 0, reference_unverified: 0,
-              elapsed_seconds: 0.1, reached_attempt_limit: false, reached_time_limit: false
+              elapsed_seconds: 0.1, reached_attempt_limit: false, reached_time_limit: false,
+              strict_matches: 0, relaxed_matches: 0
             }
           } satisfies GenerationComplete
         }))}>Store candidate result</button>

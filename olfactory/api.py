@@ -42,7 +42,6 @@ from .depictions import display_descriptors, molecule_svg
 from .data_foundation import DataFoundationService
 from .features import (
     create_morgan_tensor,
-    geometric_mean,
     predict_probabilities,  # kept as a compatibility seam for v0.5 tests/extensions
     smiles_representations,
     top_descriptors,
@@ -58,11 +57,16 @@ from .generation import (
     GenerationResult,
     RankedCandidate,
     ReviewCandidate,
-    generate_candidate_pool,
+    generate_target_aligned_pool,
     rank_candidates,
     sample_smiles_string,
 )
 from .models import OdorPredictor, SMILES_LSTM
+from .training.creator_v2 import (
+    ConditionalSELFIESTransformer,
+    sample_conditioned,
+    target_condition_vector,
+)
 from .pubchem import PubChemClient
 from .references import (
     PUBCHEM,
@@ -75,15 +79,31 @@ from .references import (
 from .resources import (
     ResourceBundleError,
     default_resource_dir,
+    load_descriptor_evidence,
     load_existing_isomeric_smiles_set,
+    load_conditioned_smiles_model,
+    load_label_positive_support,
     load_odor_model,
     load_smiles_model,
     load_training_fingerprints,
     validate_resource_bundle,
 )
+from .target_matching import (
+    DescriptorEvidence,
+    DescriptorMaturity,
+    descriptor_evidence,
+    evaluate_target_match,
+    target_match_payload,
+)
 from .taxonomy import TaxonomyProfile, load_mapping, project_probabilities
 from .stereo import enumerate_stereo_options
+from .synthesis import (
+    RetrosynthesisService,
+    UnavailableRetrosynthesisService,
+    build_retrosynthesis_service,
+)
 from .training.registry import ModelRegistry
+from .training.calibration import CalibrationBundle
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +129,8 @@ MAX_SECONDS = 120.0
 MAX_EVENT_LINES = 30
 ANALYSIS_STEREO_LIMIT = 16
 CANDIDATE_STEREO_LIMIT = 4
+MAX_TARGET_DESCRIPTORS = 3
+TARGET_SCORE_POOL_SIZE = 64
 
 
 class AnalysisRequest(BaseModel):
@@ -116,7 +138,7 @@ class AnalysisRequest(BaseModel):
 
 
 class CandidateRequest(BaseModel):
-    target_descriptors: List[str] = Field(min_length=1)
+    target_descriptors: List[str] = Field(min_length=1, max_length=MAX_TARGET_DESCRIPTORS)
     sampling_diversity: float = Field(ge=0.2, le=1.2)
     pubchem_consent: bool = False
     reference_consents: List[str] = Field(default_factory=list)
@@ -186,6 +208,16 @@ class AppResources:
     data_service: Optional[DataFoundationService] = None
     predictor: Optional[MoleculePredictor] = None
     academic_evidence_service: Optional[AcademicEvidenceService] = None
+    descriptor_evidence: Tuple[DescriptorEvidence, ...] = ()
+    conditioned_creator_model: Optional[ConditionalSELFIESTransformer] = None
+    conditioned_creator_tokens: Tuple[str, ...] = ()
+    retrosynthesis_service: RetrosynthesisService = field(
+        default_factory=UnavailableRetrosynthesisService
+    )
+    judge_calibration: Optional[CalibrationBundle] = None
+    shadow_predictor: Optional[MoleculePredictor] = None
+    shadow_error: Optional[str] = None
+    shadow_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         if self.reference_verifier is None:
@@ -196,6 +228,7 @@ class AppResources:
                 self.label_names,
                 identity=self.judge_identity,
                 training_fingerprints=self.training_fingerprints,
+                calibration=self.judge_calibration,
             )
         if self.academic_evidence_service is None:
             # Ingest writes derived evidence next to the local FAISS batches.
@@ -204,6 +237,23 @@ class AppResources:
             self.academic_evidence_service = AcademicEvidenceService(
                 AcademicEvidenceStore(ACADEMIC_EVIDENCE_PATH)
             )
+        if not self.descriptor_evidence:
+            # No support evidence means INSUFFICIENT, including in extensions.
+            self.descriptor_evidence = descriptor_evidence(
+                self.label_names,
+                [0] * len(self.label_names),
+                [0] * len(self.label_names),
+            )
+
+
+def _shadow_error_code(error: Exception) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "SHADOW_MANIFEST_NOT_FOUND"
+    if isinstance(error, (ImportError, ModuleNotFoundError)):
+        return "SHADOW_RUNTIME_UNAVAILABLE"
+    if isinstance(error, (ValueError, KeyError, json.JSONDecodeError)):
+        return "SHADOW_ARTIFACT_INVALID"
+    return "SHADOW_LOAD_FAILED"
 
 
 def load_app_resources() -> AppResources:
@@ -235,8 +285,33 @@ def load_app_resources() -> AppResources:
     odor_model, label_names = load_odor_model(dataset_path, judge_weights)
     creator_model, char_to_idx, idx_to_char = load_smiles_model(
         VOCAB_PATH,
-        creator_weights,
+        resource_dir / CREATOR_WEIGHTS_PATH.name,
     )
+    conditioned_creator_model = None
+    conditioned_creator_tokens: Tuple[str, ...] = ()
+    if str(creator_entry.get("architecture", "")).startswith("conditional-selfies"):
+        conditioned_creator_model, conditioned_creator_tokens = load_conditioned_smiles_model(
+            creator_weights
+        )
+    descriptor_metadata = descriptor_evidence(
+        label_names,
+        load_label_positive_support(dataset_path),
+        [0] * len(label_names),
+    )
+    descriptor_path = judge_entry.get("descriptor_evidence_path")
+    if descriptor_path:
+        descriptor_metadata = load_descriptor_evidence(
+            resource_dir / str(descriptor_path),
+            label_names,
+        )
+    calibration_bundle = None
+    calibration_path = judge_entry.get("calibration_path")
+    if calibration_path:
+        calibration_bundle = CalibrationBundle.load(
+            resource_dir / str(calibration_path)
+        )
+        if calibration_bundle.label_names != label_names:
+            raise ValueError("Calibration labels do not match the production Judge")
     pubchem_client = PubChemClient()
     tgsc_manifest = os.environ.get("TGSC_REFERENCE_MANIFEST")
     scentree_manifest = os.environ.get("SCENTREE_REFERENCE_MANIFEST")
@@ -263,8 +338,29 @@ def load_app_resources() -> AppResources:
             model_status=str(judge_entry.get("status", "LEGACY_BASELINE")),
         ),
         creator_registry_entry=creator_entry,
+        descriptor_evidence=descriptor_metadata,
+        conditioned_creator_model=conditioned_creator_model,
+        conditioned_creator_tokens=conditioned_creator_tokens,
+        retrosynthesis_service=build_retrosynthesis_service(
+            os.environ.get("SCENT_STUDIO_AIZYNTH_CONFIG")
+        ),
+        judge_calibration=calibration_bundle,
     )
     resources.data_service = DataFoundationService(label_names=label_names)
+    shadow_manifest = os.environ.get("SCENT_STUDIO_JUDGE_SHADOW_MANIFEST")
+    if shadow_manifest:
+        try:
+            from .training.judge_ensemble import load_chemprop_ensemble_predictor
+
+            shadow_predictor = load_chemprop_ensemble_predictor(
+                Path(shadow_manifest).expanduser()
+            )
+            if tuple(shadow_predictor.label_names) != tuple(label_names):
+                raise ValueError("Judge shadow labels do not match the production contract")
+            resources.shadow_predictor = shadow_predictor
+        except Exception as error:
+            # Shadow failure must never make the production Judge unavailable.
+            resources.shadow_error = _shadow_error_code(error)
     return resources
 
 
@@ -363,6 +459,62 @@ def _academic_evidence_payload(summary: object) -> Dict[str, object]:
     return to_dict()
 
 
+def _prediction_batch_payload(
+    batch: object,
+    *,
+    row: int,
+    model_status: str,
+    decision_thresholds: Optional[Sequence[float]] = None,
+    limitations: Sequence[str] = (),
+) -> Dict[str, object]:
+    probabilities = batch.presence_probability[row]
+    intensities = batch.expected_intensity[row]
+    uncertainties = batch.ensemble_uncertainty[row]
+    similarity = batch.training_similarity[row]
+    thresholds = tuple(decision_thresholds or ())
+    return {
+        "model_version": batch.model_version,
+        "dataset_version": batch.dataset_version,
+        "calibration_version": batch.calibration_version,
+        "model_status": model_status,
+        "calibrated": batch.calibration_version not in {"", "uncalibrated"} and not any(
+            method.upper().startswith("UNCALIBRATED") for method in batch.calibration_methods
+        ),
+        "calibration_methods": list(batch.calibration_methods),
+        "nearest_training_similarity": (
+            float(similarity) if np.isfinite(similarity) else None
+        ),
+        "reliability_state": batch.reliability_state[row],
+        "presence_predictions": [
+            {
+                "name": label,
+                "probability": float(probabilities[index]),
+                "calibration_method": batch.calibration_methods[index] if batch.calibration_methods else None,
+                "expected_intensity": (
+                    float(intensities[index]) if np.isfinite(intensities[index]) else None
+                ),
+                "uncertainty": (
+                    float(uncertainties[index]) if np.isfinite(uncertainties[index]) else None
+                ),
+                "decision_threshold": (
+                    float(thresholds[index]) if index < len(thresholds) else None
+                ),
+            }
+            for index, label in enumerate(batch.label_names)
+        ],
+        "limitations": list(limitations),
+        "presence_probability": [float(value) for value in probabilities],
+        "expected_intensity": [
+            float(value) if np.isfinite(value) else None for value in intensities
+        ],
+        "ensemble_uncertainty": [
+            float(value) if np.isfinite(value) else None for value in uncertainties
+        ],
+        "training_similarity": float(similarity) if np.isfinite(similarity) else None,
+        "reliability": batch.reliability_state[row],
+    }
+
+
 def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object]:
     normalized = raw_smiles.strip()
     with rdBase.BlockLogs():
@@ -389,6 +541,8 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
         "display_descriptors": display_descriptors(molecule, screen.descriptors),
         "predicted_odor_profile": None,
         "prediction_v2": None,
+        "shadow_prediction": None,
+        "shadow_prediction_error": None,
         "conformer_ensemble": None,
         "stereo_options": [],
         # Analysis never transmits identifiers without a dedicated consent flow.
@@ -458,6 +612,7 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
     prediction_payload.update(
         {
             "presence_probability": probability_values,
+            "calibration_methods": list(prediction_batch.calibration_methods),
             "expected_intensity": [
                 None if not np.isfinite(value) else float(value)
                 for value in prediction_batch.expected_intensity[0]
@@ -470,6 +625,29 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
             "reliability": prediction_payload["reliability_state"],
         }
     )
+    shadow_payload = None
+    shadow_error = None
+    if resources.shadow_predictor is not None:
+        try:
+            with resources.shadow_lock:
+                shadow_batch = resources.shadow_predictor.predict([isomeric_smiles])
+            shadow_calibration = getattr(resources.shadow_predictor, "calibration", None)
+            shadow_payload = _prediction_batch_payload(
+                shadow_batch,
+                row=0,
+                model_status="SHADOW_ONLY",
+                decision_thresholds=(
+                    shadow_calibration.thresholds if shadow_calibration is not None else None
+                ),
+                limitations=(
+                    "Shadow model output is not used for candidate ranking.",
+                    "Training labels are legacy weak catalog labels.",
+                    "Intensity is unavailable until reviewed panel data exists.",
+                    "The retrospective test partition has already been inspected.",
+                ),
+            )
+        except Exception:
+            shadow_error = "SHADOW_INFERENCE_FAILED"
     response.update(
         {
             "analysis_state": "COMPLETE",
@@ -494,6 +672,8 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
                 ],
             },
             "prediction_v2": prediction_payload,
+            "shadow_prediction": shadow_payload,
+            "shadow_prediction_error": shadow_error,
         }
     )
     if resources.academic_evidence_service is not None:
@@ -537,11 +717,25 @@ def _review_payload(item: ReviewCandidate) -> Dict[str, object]:
     }
 
 
-def _candidate_payload(candidate: RankedCandidate) -> Dict[str, object]:
+def _candidate_payload(
+    candidate: RankedCandidate,
+    academic_service: Optional[AcademicEvidenceService] = None,
+    retrosynthesis_service: Optional[RetrosynthesisService] = None,
+) -> Dict[str, object]:
     molecule = Chem.MolFromSmiles(candidate.isomeric_smiles)
     if molecule is None:
         raise ValueError("Ranked candidate could not be parsed")
     ensemble = candidate.conformer_ensemble
+    academic_summary = (
+        academic_service.verify(candidate.isomeric_smiles, include_abstracts=False)
+        if academic_service is not None
+        else None
+    )
+    synthesis = (
+        retrosynthesis_service.search(candidate.isomeric_smiles)
+        if retrosynthesis_service is not None
+        else UnavailableRetrosynthesisService().search(candidate.isomeric_smiles)
+    )
     return {
         "isomeric_smiles": candidate.isomeric_smiles,
         "canonical_smiles": candidate.canonical_smiles,
@@ -571,6 +765,24 @@ def _candidate_payload(candidate: RankedCandidate) -> Dict[str, object]:
             for evidence in candidate.reference_checks
         ],
         "reference_gate": _reference_gate_payload(candidate.reference_gate),
+        "target_match": (
+            target_match_payload(candidate.target_match)
+            if candidate.target_match is not None
+            else None
+        ),
+        "training_similarity": candidate.training_similarity,
+        "reliability_state": candidate.reliability_state,
+        "prediction_provenance": {
+            "model_version": candidate.model_version,
+            "dataset_version": candidate.dataset_version,
+            "calibration_version": candidate.calibration_version,
+        },
+        "synthesis_assessment": synthesis.to_dict(),
+        "academic_evidence": (
+            _academic_evidence_payload(academic_summary)
+            if academic_summary is not None
+            else None
+        ),
     }
 
 
@@ -585,10 +797,22 @@ def _completion_payload(
             resources.label_names,
             targets,
             result.accepted_candidates,
+            descriptor_metadata=resources.descriptor_evidence,
+            shortlist_count=SHORTLIST_COUNT,
         )
+    shortlist = ranked[:SHORTLIST_COUNT]
+    strict_count = sum(
+        bool(item.target_match and item.target_match.met_requested_gate)
+        for item in shortlist
+    )
     return {
         "shortlist": [
-            _candidate_payload(candidate) for candidate in ranked[:SHORTLIST_COUNT]
+            _candidate_payload(
+                candidate,
+                resources.academic_evidence_service,
+                resources.retrosynthesis_service,
+            )
+            for candidate in shortlist
         ],
         "review_queue": [_review_payload(item) for item in result.review_queue],
         "summary": {
@@ -605,6 +829,8 @@ def _completion_payload(
             "elapsed_seconds": result.elapsed_seconds,
             "reached_attempt_limit": result.reached_attempt_limit,
             "reached_time_limit": result.reached_time_limit,
+            "strict_matches": strict_count,
+            "relaxed_matches": len(shortlist) - strict_count,
         },
     }
 
@@ -704,11 +930,24 @@ def create_app(
 
     @application.get("/api/v1/health")
     async def health(request: Request):
-        ready = getattr(request.app.state, "resources", None) is not None
+        current = getattr(request.app.state, "resources", None)
+        ready = current is not None
+        shadow_status = "DISABLED"
+        shadow_error = None
+        if current is not None:
+            if current.shadow_predictor is not None:
+                shadow_status = "READY"
+            elif current.shadow_error is not None:
+                shadow_status = "LOAD_FAILED"
+                shadow_error = current.shadow_error
         return {
             "status": "ready" if ready else "degraded",
             "ready": ready,
             "resource_error": getattr(request.app.state, "resource_error", None),
+            "judge_shadow": {
+                "status": shadow_status,
+                "error_code": shadow_error,
+            },
         }
 
     @application.get("/api/v1/meta")
@@ -729,6 +968,26 @@ def create_app(
                 "max_seconds": MAX_SECONDS,
                 "max_event_lines": MAX_EVENT_LINES,
                 "candidate_stereo_limit": CANDIDATE_STEREO_LIMIT,
+                "max_target_descriptors": MAX_TARGET_DESCRIPTORS,
+                "target_score_pool_size": TARGET_SCORE_POOL_SIZE,
+            },
+            "target_matching": {
+                "requested_target_floor": 0.30,
+                "requested_fit_floor": 0.40,
+                "relaxation_step": 0.05,
+                "policy": "CONSERVATIVE_ENSEMBLE_WITH_DECLARED_RELAXATION",
+                "descriptors": [
+                    {
+                        "name": item.name,
+                        "positive_support": item.positive_support,
+                        "assessed_negative_support": item.assessed_negative_support,
+                        "maturity": item.maturity.value,
+                        "decision_threshold": item.decision_threshold,
+                        "calibration_method": item.calibration_method,
+                        "selectable": item.maturity.value != "INSUFFICIENT",
+                    }
+                    for item in current.descriptor_evidence
+                ],
             },
             "conformer_ensemble": {
                 "normal_sampling_count": NORMAL_CONFORMER_COUNT,
@@ -807,10 +1066,38 @@ def create_app(
                     "calibration_version": current.judge_identity.calibration_version,
                     "status": current.judge_identity.model_status,
                 },
+                "judge_shadow": {
+                    "enabled": current.shadow_predictor is not None,
+                    "status": (
+                        "READY"
+                        if current.shadow_predictor is not None
+                        else "LOAD_FAILED"
+                        if current.shadow_error is not None
+                        else "DISABLED"
+                    ),
+                    "error_code": current.shadow_error,
+                    "model_version": (
+                        getattr(getattr(current.shadow_predictor, "identity", None), "model_version", None)
+                    ),
+                    "dataset_version": (
+                        getattr(getattr(current.shadow_predictor, "identity", None), "dataset_version", None)
+                    ),
+                    "calibration_version": (
+                        getattr(getattr(current.shadow_predictor, "identity", None), "calibration_version", None)
+                    ),
+                    "production_usage": "ANALYSIS_TECHNICAL_DETAILS_ONLY",
+                    "gate": getattr(current.shadow_predictor, "gate_summary", None),
+                },
                 "creator": {
                     "model_version": str(current.creator_registry_entry.get("model_version", "creator-v1-legacy")),
                     "dataset_version": str(current.creator_registry_entry.get("dataset_version", "legacy-clean-3522")),
                     "status": str(current.creator_registry_entry.get("status", "LEGACY_BASELINE")),
+                    "target_conditioned": current.conditioned_creator_model is not None,
+                    "condition_schema": (
+                        "presence+assessed_mask+intensity+measured_mask+properties-v2"
+                        if current.conditioned_creator_model is not None
+                        else None
+                    ),
                 },
             },
         }
@@ -1018,10 +1305,54 @@ def create_app(
                     "message": "Unknown target descriptor: {0}".format(", ".join(unknown)),
                 },
             )
+        if len(set(payload.target_descriptors)) != len(payload.target_descriptors):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "DUPLICATE_TARGET_DESCRIPTOR",
+                    "message": "Target descriptors must be unique.",
+                },
+            )
+        metadata_by_label = {
+            item.name: item for item in current.descriptor_evidence
+        }
+        unavailable = [
+            label
+            for label in payload.target_descriptors
+            if metadata_by_label[label].maturity is DescriptorMaturity.INSUFFICIENT
+        ]
+        if unavailable:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "TARGET_DESCRIPTOR_NOT_SELECTABLE",
+                    "message": (
+                        "Insufficient evidence for target design: "
+                        + ", ".join(unavailable)
+                    ),
+                },
+            )
 
         def locked_sampler(**kwargs):
             with current.creator_lock:
-                return sample_smiles_string(**kwargs)
+                target_descriptors = tuple(kwargs.pop("target_descriptors", ()))
+                start_smiles = kwargs.pop("start_smiles", None)
+                if current.conditioned_creator_model is None:
+                    return sample_smiles_string(**kwargs)
+                device = next(current.conditioned_creator_model.parameters()).device
+                condition = torch.from_numpy(
+                    target_condition_vector(
+                        current.label_names,
+                        target_descriptors,
+                    )
+                ).to(device)
+                return sample_conditioned(
+                    current.conditioned_creator_model,
+                    condition,
+                    current.conditioned_creator_tokens,
+                    temperature=float(kwargs["temperature"]),
+                    prefix_smiles=start_smiles,
+                ) or ""
 
         target_indices = [
             current.label_names.index(label) for label in payload.target_descriptors
@@ -1036,13 +1367,23 @@ def create_app(
                     for molecule in molecules
                 ]
                 prediction = current.predictor.predict(variant_smiles)
-                matrix = torch.from_numpy(prediction.presence_probability)
+                matrix = prediction.presence_probability
+                uncertainty = prediction.ensemble_uncertainty
+            target_metadata = [
+                metadata_by_label[label] for label in payload.target_descriptors
+            ]
+            calibrated = prediction.calibration_version not in {"", "uncalibrated"}
             return [
-                geometric_mean(probabilities[target_indices])
-                for probabilities in matrix
+                evaluate_target_match(
+                    probabilities[target_indices],
+                    uncertainties[target_indices],
+                    target_metadata,
+                    calibrated=calibrated,
+                ).robust_target_fit
+                for probabilities, uncertainties in zip(matrix, uncertainty)
             ]
 
-        stream = generate_candidate_pool(
+        stream = generate_target_aligned_pool(
             creator_model=current.creator_model,
             char_to_idx=current.char_to_idx,
             idx_to_char=current.idx_to_char,
@@ -1050,12 +1391,14 @@ def create_app(
             existing_isomeric_smiles_set=current.existing_isomeric_smiles_set,
             reference_verifier=verifier,
             reference_consents=effective_consents,
+            provisional_pool_size=TARGET_SCORE_POOL_SIZE,
             required_count=REQUIRED_CANDIDATES,
             max_attempts=MAX_ATTEMPTS,
             max_seconds=MAX_SECONDS,
             stereo_limit=CANDIDATE_STEREO_LIMIT,
             sampler=locked_sampler,
             variant_scorer=locked_variant_scorer,
+            target_descriptors=payload.target_descriptors,
         )
 
         async def event_source():
@@ -1073,12 +1416,52 @@ def create_app(
                         continue
                     if result is None:
                         raise RuntimeError("Generation stream ended without a result")
+                    if result.accepted_candidates:
+                        synthesis_event = GenerationEvent(
+                            phase=GenerationPhase.RETROSYNTHESIS,
+                            attempt=result.attempts,
+                            accepted=len(result.accepted_candidates),
+                            invalid=result.invalid,
+                            duplicates=result.duplicates,
+                            rejected=result.rejected,
+                            reviews=len(result.review_queue),
+                            found=result.found,
+                            unverified=result.unverified,
+                            reference_matches=result.reference_matches,
+                            reference_unverified=result.reference_unverified,
+                        )
+                        yield _sse("progress", _event_payload(synthesis_event))
                     completion = await asyncio.to_thread(
                         _completion_payload,
                         current,
                         result,
                         payload.target_descriptors,
                     )
+                    if completion["shortlist"]:
+                        relaxed = int(completion["summary"]["relaxed_matches"])
+                        match_event = GenerationEvent(
+                            phase=(
+                                GenerationPhase.RELAXING_TARGET_GATE
+                                if relaxed
+                                else GenerationPhase.STRICT_MATCH
+                            ),
+                            attempt=result.attempts,
+                            accepted=len(result.accepted_candidates),
+                            invalid=result.invalid,
+                            duplicates=result.duplicates,
+                            rejected=result.rejected,
+                            reviews=len(result.review_queue),
+                            found=result.found,
+                            unverified=result.unverified,
+                            reference_matches=result.reference_matches,
+                            reference_unverified=result.reference_unverified,
+                            detail=(
+                                f"{relaxed} relaxed shortlist result(s)"
+                                if relaxed
+                                else "All shortlisted results met the requested gate"
+                            ),
+                        )
+                        yield _sse("progress", _event_payload(match_event))
                     yield _sse("complete", completion)
                     return
             except asyncio.CancelledError:

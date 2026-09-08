@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "review_version": "clean-master-osmo-source-terms-reviewed-v1",
+  "decision": "SOURCE_TAXONOMY_ONLY",
+  "expected_term_count": 117,
+  "expected_terms_sha256": "7fa67562bc23f860a08d2138f1b68c3a364685550ed30f12b97375639aaf64f6",
+  "source_taxonomy": "Osmo Scent Taxonomy",
+  "source_taxonomy_version": "1.2",
+  "reviewer_role": "project_owner",
+  "decision_recorded_at": "2026-09-05",
+  "rationale": "Approve the unresolved terms as valid source-taxonomy vocabulary while keeping them out of the fixed 113-label training target. Do not collapse grand families, subfamilies, textures, sensations, or distinct fine-grained descriptors into broader production labels without panel-backed evidence."
+}

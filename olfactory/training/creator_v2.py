@@ -30,7 +30,7 @@ class ConditionalSELFIESTransformer(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        condition_size: int = 229,
+        condition_size: int = 455,
         d_model: int = 256,
         nhead: int = 8,
         layers: int = 6,
@@ -78,9 +78,28 @@ def condition_vector(
     presence: np.ndarray,
     intensity: np.ndarray,
     molecule: Chem.Mol,
+    *,
+    presence_mask: Optional[np.ndarray] = None,
+    intensity_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    presence_values = np.nan_to_num(np.asarray(presence, dtype=np.float32), nan=0.0)
-    intensity_values = np.nan_to_num(np.asarray(intensity, dtype=np.float32), nan=0.0) / 10.0
+    raw_presence = np.asarray(presence, dtype=np.float32)
+    raw_intensity = np.asarray(intensity, dtype=np.float32)
+    if raw_presence.shape != raw_intensity.shape:
+        raise ValueError("Presence and intensity vectors must align")
+    assessed = (
+        np.isfinite(raw_presence).astype(np.float32)
+        if presence_mask is None
+        else np.asarray(presence_mask, dtype=np.float32)
+    )
+    measured = (
+        np.isfinite(raw_intensity).astype(np.float32)
+        if intensity_mask is None
+        else np.asarray(intensity_mask, dtype=np.float32)
+    )
+    if assessed.shape != raw_presence.shape or measured.shape != raw_intensity.shape:
+        raise ValueError("Condition masks must align with descriptor vectors")
+    presence_values = np.nan_to_num(raw_presence, nan=0.0)
+    intensity_values = np.nan_to_num(raw_intensity, nan=0.0) / 10.0
     properties = np.asarray(
         [
             Descriptors.ExactMolWt(molecule) / 330.0,
@@ -89,7 +108,33 @@ def condition_vector(
         ],
         dtype=np.float32,
     )
-    return np.concatenate([presence_values, intensity_values, properties])
+    return np.concatenate(
+        [presence_values, assessed, intensity_values, measured, properties]
+    )
+
+
+def target_condition_vector(
+    label_names: Sequence[str],
+    target_descriptors: Sequence[str],
+    *,
+    reference_smiles: str = "CCOC(=O)C",
+) -> np.ndarray:
+    """Build a target condition without forcing unselected labels absent."""
+    labels = tuple(str(value) for value in label_names)
+    index_by_label = {label: index for index, label in enumerate(labels)}
+    unknown = sorted(set(target_descriptors) - set(labels))
+    if unknown:
+        raise ValueError(f"Unknown target descriptors: {', '.join(unknown)}")
+    if not 1 <= len(target_descriptors) <= 3:
+        raise ValueError("Target-conditioned sampling requires one to three descriptors")
+    presence = np.full(len(labels), np.nan, dtype=np.float32)
+    intensity = np.full(len(labels), np.nan, dtype=np.float32)
+    for label in target_descriptors:
+        presence[index_by_label[label]] = 1.0
+    molecule = Chem.MolFromSmiles(reference_smiles)
+    if molecule is None:
+        raise ValueError("Reference property SMILES is invalid")
+    return condition_vector(presence, intensity, molecule)
 
 
 def build_selfies_vocabulary(smiles: Sequence[str]) -> Dict[str, object]:
@@ -144,14 +189,23 @@ def sample_conditioned(
     temperature: float = 0.8,
     max_length: int = 120,
     generator: Optional[torch.Generator] = None,
+    prefix_smiles: Optional[str] = None,
+    prefix_fraction: float = 0.4,
 ) -> Optional[str]:
     token_to_idx = {token: index for index, token in enumerate(tokens)}
-    current = torch.tensor(
-        [[token_to_idx[BOS_TOKEN]]],
-        dtype=torch.long,
-        device=condition.device,
-    )
-    for _ in range(max_length):
+    prefix_ids = [token_to_idx[BOS_TOKEN]]
+    if prefix_smiles:
+        try:
+            encoded = encode_selfies(prefix_smiles, token_to_idx)[1:-1]
+        except (KeyError, RuntimeError):
+            encoded = []
+        retained = max(
+            1,
+            int(len(encoded) * float(np.clip(prefix_fraction, 0.1, 0.8))),
+        )
+        prefix_ids.extend(encoded[:retained])
+    current = torch.tensor([prefix_ids], dtype=torch.long, device=condition.device)
+    for _ in range(max(0, max_length - len(prefix_ids) + 1)):
         logits = model(current, condition.unsqueeze(0))[:, -1, :]
         logits[:, token_to_idx[PAD_TOKEN]] = float("-inf")
         logits[:, token_to_idx[BOS_TOKEN]] = float("-inf")
@@ -172,6 +226,64 @@ def robust_target_fit(probability_ensemble: np.ndarray) -> Tuple[float, float]:
     target_fit = float(np.exp(per_model_log_fit.mean()))
     robust_fit = float(np.exp(per_model_log_fit.mean() - 1.64 * per_model_log_fit.std()))
     return target_fit, robust_fit
+
+
+def target_alignment_benchmark(
+    conditional_probabilities: np.ndarray,
+    unconditional_probabilities: np.ndarray,
+    *,
+    target_floor: float = 0.30,
+    fit_floor: float = 0.40,
+    bootstrap_iterations: int = 2000,
+    seed: int = 42,
+) -> Dict[str, float]:
+    """Compare strict target yield against an equal-budget unconditional control.
+
+    Inputs may be precomputed conservative probabilities shaped
+    ``runs × samples × targets`` or calibrated ensemble probabilities shaped
+    ``runs × samples × models × targets``. The evaluation Judge must not be the
+    single model optimized online by the Creator.
+    """
+    conditional = np.asarray(conditional_probabilities, dtype=float)
+    unconditional = np.asarray(unconditional_probabilities, dtype=float)
+    if conditional.ndim not in {3, 4} or conditional.shape != unconditional.shape:
+        raise ValueError(
+            "Target benchmark arrays must align as runs × samples × targets "
+            "or runs × samples × models × targets"
+        )
+    if not conditional.size:
+        raise ValueError("Target benchmark arrays cannot be empty")
+
+    def conservative_values(values: np.ndarray) -> np.ndarray:
+        if values.ndim == 3:
+            return np.clip(values, 0.0, 1.0)
+        return np.clip(values.mean(axis=2) - 1.64 * values.std(axis=2), 0.0, 1.0)
+
+    def strict_counts(values: np.ndarray) -> np.ndarray:
+        clipped = np.clip(conservative_values(values), 1e-12, 1.0)
+        fits = np.exp(np.log(clipped).mean(axis=2))
+        strict = (clipped >= target_floor).all(axis=2) & (fits >= fit_floor)
+        return strict.sum(axis=1).astype(float)
+
+    conditional_counts = strict_counts(conditional)
+    unconditional_counts = strict_counts(unconditional)
+    deltas = conditional_counts - unconditional_counts
+    rng = np.random.default_rng(seed)
+    bootstrap = np.empty(bootstrap_iterations, dtype=float)
+    for iteration in range(bootstrap_iterations):
+        rows = rng.integers(0, len(deltas), size=len(deltas))
+        bootstrap[iteration] = deltas[rows].mean()
+    return {
+        "runs": float(conditional.shape[0]),
+        "samples_per_run": float(conditional.shape[1]),
+        "targets_per_profile": float(conditional.shape[-1]),
+        "conditional_strict_yield_mean": float(conditional_counts.mean()),
+        "unconditional_strict_yield_mean": float(unconditional_counts.mean()),
+        "runs_with_three_strict": float((conditional_counts >= 3).mean()),
+        "target_enrichment_delta": float(deltas.mean()),
+        "target_enrichment_ci_lower": float(np.quantile(bootstrap, 0.025)),
+        "target_enrichment_ci_upper": float(np.quantile(bootstrap, 0.975)),
+    }
 
 
 def _internal_diversity(molecules: Sequence[Chem.Mol]) -> float:

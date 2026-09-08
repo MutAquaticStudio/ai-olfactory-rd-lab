@@ -1,4 +1,4 @@
-"""Validation-only Platt calibration with prevalence-tier fallback."""
+"""Calibration-partition Platt scaling with prevalence-tier fallback."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ class CalibrationBundle:
     ) -> "CalibrationBundle":
         logits = np.asarray(logits, dtype=float)
         targets = np.asarray(targets, dtype=float)
-        valid = np.isfinite(targets) if mask is None else np.asarray(mask, dtype=bool)
+        valid = np.isfinite(targets) if mask is None else np.asarray(mask, dtype=bool) & np.isfinite(targets)
         if logits.shape != targets.shape or logits.shape[1] != len(label_names):
             raise ValueError("Calibration arrays do not match label names")
 
@@ -123,11 +123,14 @@ class CalibrationBundle:
             if positives >= minimum_support and negatives >= minimum_support:
                 a, b = _fit_platt(x, y)
                 method = "per_label_platt"
-            else:
+            elif positives >= 10 and negatives >= 10 and _tier(prevalence[label]) in tier_parameters:
                 a, b = tier_parameters[_tier(prevalence[label])]
                 method = f"{_tier(prevalence[label])}_tier_platt"
+            else:
+                a, b = 1.0, 0.0
+                method = "UNCALIBRATED_INSUFFICIENT_EVIDENCE"
             probability = _sigmoid(a * x + b)
-            threshold = _best_f1_threshold(y, probability) if positives and negatives else 0.5
+            threshold = _best_f1_threshold(y, probability) if not method.startswith("UNCALIBRATED") else 0.5
             slopes.append(a)
             intercepts.append(b)
             thresholds.append(threshold)

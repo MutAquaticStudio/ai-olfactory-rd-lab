@@ -10,6 +10,7 @@ until the benchmark promotion gate passes.
 from __future__ import annotations
 
 import copy
+import csv
 import hashlib
 import json
 import random
@@ -27,6 +28,7 @@ from torch.nn import functional as F
 
 from ..prediction import PredictionBatch
 from ..prediction_integrity import PredictionIdentity, reliability_state
+from ..target_matching import descriptor_evidence, descriptor_evidence_payload
 from .dataset import MolecularTargetTable
 from .calibration import CalibrationBundle
 from .judge_v2 import effective_positive_weights, masked_multitask_loss
@@ -305,7 +307,11 @@ def train_deepchem_judge(
     node_features, edge_features = _graph_dimensions(graphs)
     model = DeepChemGraphJudge(node_features, edge_features, len(table.label_names))
     targets = np.concatenate([table.presence, table.intensity], axis=1).astype(np.float32)
-    train_indices, validation_indices, test_indices = map(list, (split.train_indices, split.validation_indices, split.test_indices))
+    train_indices, validation_indices, test_indices = map(
+        list,
+        (split.train_indices, split.validation_indices, split.test_indices),
+    )
+    calibration_indices = list(split.calibration_indices or split.validation_indices)
     positive_weights = effective_positive_weights(
         torch.from_numpy(table.presence[train_indices]),
         torch.from_numpy(table.presence_mask[train_indices]),
@@ -316,10 +322,12 @@ def train_deepchem_judge(
     best_loss = float("inf")
     stale = 0
     completed = 0
+    learning_history: List[Dict[str, float]] = []
     for epoch in range(1, max_epochs + 1):
         model.train()
         order = np.asarray(train_indices, dtype=int)
         generator.shuffle(order)
+        train_losses: List[float] = []
         for start in range(0, len(order), batch_size):
             batch = order[start : start + batch_size].tolist()
             logits, intensity = model([graphs[index] for index in batch])
@@ -329,6 +337,7 @@ def train_deepchem_judge(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            train_losses.append(float(loss.item()))
         model.eval()
         with torch.inference_mode():
             validation_logits, validation_intensity = model([graphs[index] for index in validation_indices])
@@ -341,6 +350,26 @@ def train_deepchem_judge(
                 intensity_weight,
             )
         value = float(validation_loss.item())
+        validation_probabilities = torch.sigmoid(validation_logits).cpu().numpy()
+        presence_metrics = multilabel_metrics(
+            table.presence[validation_indices],
+            validation_probabilities,
+        )
+        epoch_intensity = intensity_metrics(
+            table.intensity[validation_indices],
+            validation_intensity.cpu().numpy(),
+        )
+        learning_history.append(
+            {
+                "epoch": float(epoch),
+                "train_loss": float(np.mean(train_losses)),
+                "validation_loss": value,
+                "validation_macro_ap": float(presence_metrics["macro_average_precision_supported"]),
+                "validation_micro_ap": float(presence_metrics["micro_average_precision"]),
+                "validation_ece": float(presence_metrics["mean_label_ece"]),
+                "validation_intensity_mae": float(epoch_intensity["masked_mae"]),
+            }
+        )
         completed = epoch
         if value < best_loss - 1e-6:
             best_loss = value
@@ -353,15 +382,26 @@ def train_deepchem_judge(
     if best_state is None:
         raise RuntimeError("DeepChem graph training produced no checkpoint")
     model.load_state_dict(best_state)
+    calibration_set = _evaluate(
+        model,
+        graphs,
+        targets,
+        calibration_indices,
+        len(table.label_names),
+    )
     validation = _evaluate(model, graphs, targets, validation_indices, len(table.label_names))
     locked_test = _evaluate(model, graphs, targets, test_indices, len(table.label_names))
-    # Calibration parameters and per-label thresholds are fitted on validation
-    # only.  The locked test remains untouched until this final report.
+    # Calibration parameters and thresholds are fitted on the dedicated
+    # calibration partition. Validation remains reserved for model selection.
     calibration = CalibrationBundle.fit(
-        validation["logits"],
-        table.presence[validation_indices],
+        calibration_set["logits"],
+        table.presence[calibration_indices],
         table.label_names,
         minimum_support=50,
+    )
+    calibration_set["presence"] = multilabel_metrics(
+        table.presence[calibration_indices],
+        calibration.transform_logits(calibration_set["logits"]),
     )
     validation["presence"] = multilabel_metrics(
         table.presence[validation_indices],
@@ -391,14 +431,68 @@ def train_deepchem_judge(
     (run_dir / "split.json").write_text(json.dumps(split.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
     calibration_path = run_dir / "calibration.json"
     calibration.save(calibration_path)
+    descriptor_path = run_dir / "descriptor_evidence.json"
+    descriptor_records = descriptor_evidence(
+        table.label_names,
+        np.sum(table.presence == 1, axis=0).astype(int).tolist(),
+        np.sum(table.presence == 0, axis=0).astype(int).tolist(),
+        calibration.thresholds,
+        calibration.methods,
+    )
+    descriptor_path.write_text(
+        json.dumps(
+            descriptor_evidence_payload(descriptor_records),
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     metrics = {
+        "calibration": {key: value for key, value in calibration_set.items() if key not in {"logits", "intensity_values"}},
         "validation": {key: value for key, value in validation.items() if key not in {"logits", "intensity_values"}},
         "locked_test": {key: value for key, value in locked_test.items() if key not in {"logits", "intensity_values"}},
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+    learning_json = run_dir / "learning_curve.json"
+    learning_csv = run_dir / "learning_curve.csv"
+    learning_png = run_dir / "learning_curve.png"
+    learning_json.write_text(json.dumps(learning_history, indent=2, sort_keys=True), encoding="utf-8")
+    with learning_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(learning_history[0]))
+        writer.writeheader()
+        writer.writerows(learning_history)
+    import matplotlib.pyplot as plt
+
+    epochs = [record["epoch"] for record in learning_history]
+    figure, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes[0, 0].plot(epochs, [record["train_loss"] for record in learning_history], label="Train")
+    axes[0, 0].plot(epochs, [record["validation_loss"] for record in learning_history], label="Validation")
+    axes[0, 0].set(title="Masked multitask loss", xlabel="Epoch", ylabel="Loss")
+    axes[0, 0].legend()
+    axes[0, 1].plot(epochs, [record["validation_macro_ap"] for record in learning_history], label="Macro AP")
+    axes[0, 1].plot(epochs, [record["validation_micro_ap"] for record in learning_history], label="Micro AP")
+    axes[0, 1].set(title="Presence ranking", xlabel="Epoch", ylabel="Average precision")
+    axes[0, 1].legend()
+    axes[1, 0].plot(epochs, [record["validation_ece"] for record in learning_history])
+    axes[1, 0].set(title="Calibration error (uncalibrated epoch output)", xlabel="Epoch", ylabel="Mean label ECE")
+    axes[1, 1].plot(epochs, [record["validation_intensity_mae"] for record in learning_history])
+    axes[1, 1].set(title="Conditional intensity", xlabel="Epoch", ylabel="Masked MAE")
+    figure.tight_layout()
+    figure.savefig(learning_png, dpi=180)
+    plt.close(figure)
     checksums = {
         name: sha256_file(run_dir / name)
-        for name in ("weights.pth", "config.json", "split.json", "metrics.json", "calibration.json")
+        for name in (
+            "weights.pth",
+            "config.json",
+            "split.json",
+            "metrics.json",
+            "calibration.json",
+            "descriptor_evidence.json",
+            "learning_curve.json",
+            "learning_curve.csv",
+            "learning_curve.png",
+        )
     }
     manifest: Dict[str, object] = {
         "run_id": run_id,
@@ -418,6 +512,8 @@ def train_deepchem_judge(
         "calibration_version": calibration.calibration_version,
         "calibration_path": str(calibration_path),
         "calibration_sha256": sha256_file(calibration_path),
+        "descriptor_evidence_path": str(descriptor_path),
+        "descriptor_evidence_sha256": sha256_file(descriptor_path),
         "metrics": metrics,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "CANDIDATE",
@@ -425,6 +521,7 @@ def train_deepchem_judge(
         "deepchem_is_training_only": True,
         "epochs": completed,
         "best_validation_loss": best_loss,
+        "learning_curve_path": str(learning_png),
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return manifest

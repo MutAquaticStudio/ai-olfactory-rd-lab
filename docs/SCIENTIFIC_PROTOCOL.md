@@ -38,9 +38,11 @@ by ISO 13299 sensory-profile principles but is not an ISO certification.
 
 ## Model evaluation
 
-- Connectivity/scaffold groups never cross train, validation or locked test.
+- Connectivity/scaffold groups never cross training, calibration, validation,
+  or locked test. The fixed allocation is 60/10/15/15.
 - Grouped five-fold CV with three seeds is restricted to development data.
-- Calibration and thresholds use validation only. Locked test is evaluated once
+- Early stopping uses validation. Probability calibration and descriptor
+  thresholds use only the calibration partition. Locked test is evaluated once
   for a promotion decision; private blinded-panel data is never used for tuning.
 - Bootstrap confidence intervals sample molecule groups rather than rows.
 - Report results by source, nearest-training similarity bin and stereo challenge
@@ -58,6 +60,18 @@ are atomic and retain the previous entry for rollback.
 
 ## Creator evaluation
 
+Target design accepts at most three descriptors. `SUPPORTED` descriptors need
+at least 50 positive and 50 assessed-negative examples; `LIMITED_EVIDENCE`
+descriptors use their frozen calibration-tier threshold; descriptors with fewer
+than ten positives are not selectable. Unselected descriptors remain
+`UNASSESSED` in the conditioning vector.
+
+For supported targets, strict selection requires every conservative probability
+to reach 0.30 and their geometric mean to reach 0.40. Conservative probability
+is the ensemble mean minus 1.64 standard deviations, clipped at zero. Any
+threshold relaxation is recorded per candidate and never presented as meeting
+the original request.
+
 For each target profile, sample 1,000 structures and report RDKit validity,
 canonical uniqueness, chemistry PASS, scaffold novelty, internal diversity,
 property/SA distributions and out-of-domain rate. Compare conditional target
@@ -68,6 +82,10 @@ or pushing candidates out of domain.
 Prospective promotion requires the blind-panel target presence/intensity effect
 against matched controls to have a 95% confidence interval whose lower bound is
 above zero.
+
+Ertl SAscore, optional AiZynthFinder route search, academic citations, and odor
+prediction remain separate evidence types. Route search is capped at 300 seconds
+per shortlisted structure and does not constitute a synthesis guarantee.
 
 ## Privacy and retention
 

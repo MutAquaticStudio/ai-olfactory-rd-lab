@@ -18,6 +18,11 @@
     "dravnieks_1985": {
       "quality_tier": "QUANTITATIVE_PANEL_AGGREGATE",
       "license_status": "REVIEW_REQUIRED",
+      "license_reason": "No explicit reusable data license confirmed. ASTM product page states AI use of ASTM standards and related intellectual property is prohibited; written permission is required before this source is enabled.",
+      "license_evidence_url": "https://store.astm.org/ds61-eb.html",
+      "original_source": "https://doi.org/10.1520/DS61-EB",
+      "rating_granularity": "AGGREGATE",
+      "protocol_review": "PENDING",
       "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "behavior_1.csv", "behavior_2.csv"],
       "training_semantics": "Preserve applicability and use measures as separate source domains."
     },
@@ -29,8 +34,23 @@
     },
     "keller_2016": {
       "quality_tier": "QUANTITATIVE_PANEL_REPLICATED",
-      "license_status": "REVIEW_REQUIRED",
-      "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "subjects.csv", "behavior.csv"],
+      "license_status": "APPROVED",
+      "license_ticket": "PUBLISHED_DATA_CC0_10.1186_s12868-016-0287-2",
+      "license": "CC0-1.0 for article data unless otherwise stated; article CC-BY-4.0",
+      "license_evidence_url": "https://link.springer.com/article/10.1186/s12868-016-0287-2#rightslink",
+      "license_review_basis": "Published rights notice, checked 2026-09-05; permission review does not approve molecular identity or descriptor mapping.",
+      "original_source": "https://doi.org/10.1186/s12868-016-0287-2",
+      "rating_granularity": "INDIVIDUAL",
+      "protocol_review": "PENDING",
+      "rating_scale": [0, 100],
+      "original_workbook": {
+        "filename": "12868_2016_287_MOESM1_ESM.xlsx",
+        "sha256": "efcb1b07558431c869c5578abcd3fa1e4405a38cc68a8b1c1621594c673d9f62",
+        "url": "https://media.springernature.com/original/springer-static/esm/art%3A10.1186%2Fs12868-016-0287-2/MediaObjects/12868_2016_287_MOESM1_ESM.xlsx",
+        "review_basis": "Original supplement checked against all 1,430,000 processed responses on 2026-09-05. Provenance recovery only; no protocol, stereo or training approval."
+      },
+      "semantic_warnings": ["Musky in this lay panel is not equivalent to perfumery musk (article Discussion).", "Only a subset of stimuli was replicated.", "Do not convert missing slider responses into negative labels."],
+      "files": ["manifest.toml", "molecules.csv", "stimuli.csv", "behavior.csv"],
       "training_semantics": "Preserve subject and replicate identifiers; do not aggregate during ingestion."
     }
   }

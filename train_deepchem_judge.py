@@ -47,9 +47,13 @@ def main() -> None:
     if args.split_manifest:
         split = split_from_payload(load_immutable_manifest(args.split_manifest, table=table))
     else:
-        from olfactory.training.splits import chemical_group_split
+        from olfactory.training.splits import chemical_group_calibrated_split
         import numpy as np
-        split = chemical_group_split(table.smiles, np.nan_to_num(table.presence, nan=0.0), seed=42)
+        split = chemical_group_calibrated_split(
+            table.smiles,
+            np.nan_to_num(table.presence, nan=0.0),
+            seed=42,
+        )
     try:
         manifest = train_deepchem_judge(
             table,

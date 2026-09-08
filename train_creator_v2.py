@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import hashlib
 import json
 import random
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from rdkit import Chem
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -27,10 +29,12 @@ from olfactory.training.creator_v2 import (
     encode_selfies,
     evaluate_generated_smiles,
     sample_conditioned,
+    target_alignment_benchmark,
+    target_condition_vector,
 )
 from olfactory.training.dataset import load_versioned_snapshot
 from olfactory.training.gates import creator_promotion_gate
-from olfactory.training.splits import chemical_group_split
+from olfactory.training.splits import chemical_group_calibrated_split
 from olfactory.training.tracking import log_manifest_to_mlflow
 from olfactory.resources import validate_resource_bundle
 
@@ -52,7 +56,16 @@ def parse_args():
     parser.add_argument("--max-epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--benchmark-samples", type=int, default=1000)
-    parser.add_argument("--target-enrichment-ci-lower", type=float)
+    parser.add_argument(
+        "--target-score-benchmark",
+        type=Path,
+        help="NPZ with conditional and unconditional calibrated score arrays",
+    )
+    parser.add_argument(
+        "--target-enrichment-ci-lower",
+        type=float,
+        help="Deprecated; manual promotion metrics are ignored",
+    )
     parser.add_argument("--blind-panel-effect-ci-lower", type=float)
     parser.add_argument("--diversity-not-degraded", action="store_true")
     parser.add_argument("--ood-not-increased", action="store_true")
@@ -121,7 +134,11 @@ def main() -> None:
         molecule = Chem.MolFromSmiles(value)
         conditions.append(condition_vector(presence[row], intensity[row], molecule))
     condition_tensor = torch.from_numpy(np.stack(conditions)).float()
-    split = chemical_group_split(smiles, np.nan_to_num(presence, nan=0.0), seed=args.seed)
+    split = chemical_group_calibrated_split(
+        smiles,
+        np.nan_to_num(presence, nan=0.0),
+        seed=args.seed,
+    )
 
     def loader(indices, shuffle):
         dataset = TensorDataset(input_ids[list(indices)], target_ids[list(indices)], condition_tensor[list(indices)])
@@ -154,7 +171,13 @@ def main() -> None:
         pretrain_conditions = torch.from_numpy(
             np.stack(
                 [
-                    condition_vector(zero_presence, zero_intensity, Chem.MolFromSmiles(value))
+                    condition_vector(
+                        zero_presence,
+                        zero_intensity,
+                        Chem.MolFromSmiles(value),
+                        presence_mask=np.zeros(len(labels), dtype=np.float32),
+                        intensity_mask=np.zeros(len(labels), dtype=np.float32),
+                    )
                     for value, _ in retained
                 ]
             )
@@ -180,6 +203,7 @@ def main() -> None:
     best_loss = float("inf")
     best_state = None
     stale = 0
+    training_history = []
     for epoch in range(1, args.max_epochs + 1):
         model.train()
         train_losses = []
@@ -199,7 +223,11 @@ def main() -> None:
                 loss = criterion(logits.reshape(-1, len(tokens)), targets.to(device).reshape(-1))
                 validation_losses.append(float(loss.item()))
         validation_loss = float(np.mean(validation_losses))
-        print(f"Epoch {epoch:03d} | Train {np.mean(train_losses):.5f} | Validation {validation_loss:.5f}")
+        train_loss = float(np.mean(train_losses))
+        training_history.append(
+            {"epoch": epoch, "train_loss": train_loss, "validation_loss": validation_loss}
+        )
+        print(f"Epoch {epoch:03d} | Train {train_loss:.5f} | Validation {validation_loss:.5f}")
         if validation_loss < best_loss - 1e-6:
             best_loss = validation_loss
             best_state = copy.deepcopy(model.state_dict())
@@ -213,14 +241,14 @@ def main() -> None:
         raise RuntimeError("Creator v2 did not produce a checkpoint")
     model.load_state_dict(best_state)
 
-    target_presence = np.zeros(len(labels), dtype=np.float32)
-    target_intensity = np.zeros(len(labels), dtype=np.float32)
-    for descriptor in [value.strip() for value in args.target_descriptors.split(",") if value.strip()]:
-        index = labels.index(descriptor)
-        target_presence[index] = 1.0
-        target_intensity[index] = 6.0
-    representative = Chem.MolFromSmiles("CCOC(=O)C")
-    condition = torch.from_numpy(condition_vector(target_presence, target_intensity, representative)).to(device)
+    selected_targets = [
+        value.strip()
+        for value in args.target_descriptors.split(",")
+        if value.strip()
+    ]
+    condition = torch.from_numpy(
+        target_condition_vector(labels, selected_targets)
+    ).to(device)
     generator = None
     if device.type in {"cpu", "cuda"}:
         generator = torch.Generator(device=device.type).manual_seed(args.seed)
@@ -229,9 +257,20 @@ def main() -> None:
         for _ in range(args.benchmark_samples)
     ]
     benchmark = evaluate_generated_smiles(generated, smiles)
+    if args.target_score_benchmark:
+        score_arrays = np.load(args.target_score_benchmark)
+        alignment = target_alignment_benchmark(
+            score_arrays["conditional"],
+            score_arrays["unconditional"],
+            seed=args.seed,
+        )
+        benchmark.update(alignment)
+        target_enrichment_ci_lower = alignment["target_enrichment_ci_lower"]
+    else:
+        target_enrichment_ci_lower = None
     promotion = creator_promotion_gate(
         benchmark,
-        target_enrichment_ci_lower=args.target_enrichment_ci_lower,
+        target_enrichment_ci_lower=target_enrichment_ci_lower,
         diversity_not_degraded=args.diversity_not_degraded,
         ood_not_increased=args.ood_not_increased,
         blind_panel_effect_ci_lower=args.blind_panel_effect_ci_lower,
@@ -239,18 +278,51 @@ def main() -> None:
     run_id = f"creator-v2-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-s{args.seed}"
     run_dir = args.artifact_root / "creator" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    history_path = run_dir / "learning_history.json"
+    history_path.write_text(
+        json.dumps(training_history, indent=2),
+        encoding="utf-8",
+    )
+    history_csv_path = run_dir / "learning_history.csv"
+    with history_csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=("epoch", "train_loss", "validation_loss"))
+        writer.writeheader()
+        writer.writerows(training_history)
+    curve_path = run_dir / "learning_curve.png"
+    figure, axis = plt.subplots(figsize=(9, 5))
+    axis.plot(
+        [item["epoch"] for item in training_history],
+        [item["train_loss"] for item in training_history],
+        label="Train loss",
+    )
+    axis.plot(
+        [item["epoch"] for item in training_history],
+        [item["validation_loss"] for item in training_history],
+        label="Validation loss",
+    )
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("Cross-entropy loss")
+    axis.set_title("Conditional SELFIES Transformer learning curve")
+    axis.grid(alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(curve_path, dpi=180)
+    plt.close(figure)
     weights_path = run_dir / "creator_v2_weights.pth"
     torch.save(
         {
             "state_dict": model.cpu().state_dict(),
             "tokens": tokens,
             "label_names": labels,
-            "condition_size": 229,
+            "condition_size": 455,
+            "condition_schema": "presence+assessed_mask+intensity+measured_mask+properties-v2",
             "architecture": {"layers": 6, "d_model": 256, "heads": 8},
         },
         weights_path,
     )
     (run_dir / "selfies_vocab.json").write_text(json.dumps(vocabulary, indent=2), encoding="utf-8")
+    split_path = run_dir / "split.json"
+    split_path.write_text(json.dumps(split.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
     manifest = {
         "run_id": run_id,
         "model_version": run_id,
@@ -258,6 +330,14 @@ def main() -> None:
         "split_hash": split.split_hash,
         "seed": args.seed,
         "validation_loss": best_loss,
+        "learning_curve_path": str(curve_path),
+        "learning_curve_sha256": hashlib.sha256(curve_path.read_bytes()).hexdigest(),
+        "learning_history_path": str(history_path),
+        "learning_history_sha256": hashlib.sha256(history_path.read_bytes()).hexdigest(),
+        "learning_history_csv_path": str(history_csv_path),
+        "learning_history_csv_sha256": hashlib.sha256(history_csv_path.read_bytes()).hexdigest(),
+        "split_path": str(split_path),
+        "split_sha256": hashlib.sha256(split_path.read_bytes()).hexdigest(),
         "pretraining": {
             "used": bool(approved),
             "approved_molecules": len(approved),
@@ -266,7 +346,8 @@ def main() -> None:
             "license_approval_ticket": pretrain_manifest.get("license_approval_ticket") if pretrain_manifest else None,
         },
         "benchmark": benchmark,
-        "target_enrichment_ci_lower": args.target_enrichment_ci_lower,
+        "target_enrichment_ci_lower": target_enrichment_ci_lower,
+        "manual_target_enrichment_ignored": args.target_enrichment_ci_lower,
         "promotion_gate": promotion.to_dict(),
         "promotion_eligible": promotion.eligible,
         "prospective_panel_status": "PASSED" if args.blind_panel_effect_ci_lower and args.blind_panel_effect_ci_lower > 0 else "REQUIRED",
