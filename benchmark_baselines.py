@@ -24,7 +24,6 @@ from olfactory.resources import validate_resource_bundle
 
 
 ROOT = Path(__file__).resolve().parent
-RESOURCE_DIR = validate_resource_bundle()
 
 
 def logits(probabilities):
@@ -44,11 +43,12 @@ def main() -> None:
     parser.add_argument("--split-manifest", type=Path, default=None,
                         help="Use an existing immutable split manifest")
     args = parser.parse_args()
+    resource_dir = validate_resource_bundle()
     if args.legacy_baseline:
-        table = load_legacy_baseline(ROOT / "clean_dataset.csv", RESOURCE_DIR / "odor_morgan_tensor_dataset.pt")
+        table = load_legacy_baseline(ROOT / "clean_dataset.csv", resource_dir / "odor_morgan_tensor_dataset.pt")
         dataset_version = args.dataset_version or "legacy-clean-3522"
     else:
-        legacy = torch.load(RESOURCE_DIR / "odor_morgan_tensor_dataset.pt", map_location="cpu", weights_only=False)
+        legacy = torch.load(resource_dir / "odor_morgan_tensor_dataset.pt", map_location="cpu", weights_only=False)
         labels = tuple(str(value) for value in legacy.label_names)
         table = load_versioned_snapshot(args.snapshot, labels, strict_panel_gate=not args.allow_pre_panel_data)
         dataset_version = args.dataset_version or args.snapshot.stem
