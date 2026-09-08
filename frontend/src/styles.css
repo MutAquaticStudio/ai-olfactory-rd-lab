@@ -205,6 +205,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visibl
 .integrity-grid .reliability-in_domain { color: var(--success); }
 .integrity-grid .reliability-limited_evidence { color: var(--warning); }
 .integrity-grid .reliability-out_of_domain { color: var(--danger); }
+.shadow-comparison { margin: 12px 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+.shadow-comparison-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.shadow-comparison-heading h3 { margin: 0; color: var(--text); font-size: 11px; }
+.shadow-comparison-heading span { padding: 3px 6px; border-radius: 99px; color: var(--warning); background: var(--warning-soft); font-size: 8px; font-weight: 700; }
+.shadow-output-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.shadow-output-grid h4 { margin: 0 0 5px; color: var(--text); font-size: 9px; }
+.shadow-output-grid p { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 4px; }
+.shadow-output-grid p span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shadow-output-grid p strong { color: var(--text); font-size: 9px; white-space: nowrap; }
 .odor-profile-panel { margin-top: 12px; box-shadow: none; }
 .odor-profile-grid { min-height: 310px; display: grid; grid-template-columns: 1.15fr 0.92fr 0.92fr; }
 .odor-profile-grid > div { min-width: 0; padding: 12px 16px 10px; }

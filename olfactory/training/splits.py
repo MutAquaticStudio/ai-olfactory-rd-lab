@@ -82,6 +82,54 @@ def _acyclic_clusters(
     return [tuple(indices[position] for position in cluster) for cluster in clusters]
 
 
+def _merge_group_ids_by_connectivity(
+    group_ids: Sequence[str],
+    connectivity_keys: Sequence[str],
+) -> Tuple[str, ...]:
+    """Merge every topology group connected by a shared connectivity identity.
+
+    A Butina cluster may contain more than one connectivity identity, while
+    stereoisomers of either identity can initially land in other clusters.
+    Those relationships are transitive, so a one-pass alias map can split the
+    first identity again when the shared cluster is processed for the second.
+    Union-find preserves the complete connected component as one split group.
+    """
+    if len(group_ids) != len(connectivity_keys):
+        raise ValueError("Group IDs and connectivity keys must be aligned")
+
+    parents = {str(group): str(group) for group in group_ids}
+
+    def find(group: str) -> str:
+        root = group
+        while parents[root] != root:
+            root = parents[root]
+        while parents[group] != group:
+            parent = parents[group]
+            parents[group] = root
+            group = parent
+        return root
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        canonical, alias = sorted((left_root, right_root))
+        parents[alias] = canonical
+
+    groups_by_connectivity: Dict[str, List[str]] = {}
+    for group, connectivity in zip(group_ids, connectivity_keys):
+        groups_by_connectivity.setdefault(str(connectivity), []).append(str(group))
+    for members in groups_by_connectivity.values():
+        if not members:
+            continue
+        anchor = members[0]
+        for member in members[1:]:
+            union(anchor, member)
+
+    return tuple(find(str(group)) for group in group_ids)
+
+
 def chemical_groups(
     smiles: Sequence[str],
     similarity_threshold: float = 0.6,
@@ -113,24 +161,28 @@ def chemical_groups(
         key = f"scaffold:{scaffold}"
         for index in indices:
             group_ids[index] = key
+    # Cluster one deterministic stereo-aware representative per connectivity.
+    # Expand all its variants into the assigned cluster afterwards.
+    representatives: Dict[str, List[int]] = {}
+    for index in acyclic_indices:
+        representatives.setdefault(connectivity_keys[index], []).append(index)
+    representative_indices = [
+        min(indices, key=lambda i: (Chem.MolToSmiles(molecules[i], isomericSmiles=True), i))
+        for _, indices in sorted(representatives.items())
+    ]
     for cluster_number, cluster in enumerate(
-        _acyclic_clusters(acyclic_indices, molecules, similarity_threshold)
+        _acyclic_clusters(representative_indices, molecules, similarity_threshold)
     ):
         key = f"acyclic:{cluster_number:05d}"
-        for index in cluster:
-            group_ids[index] = key
+        for representative in cluster:
+            for index in representatives[connectivity_keys[representative]]:
+                group_ids[index] = key
 
-    # Connectivity identity is a stronger boundary than an accidental cluster split.
-    connectivity_to_groups: Dict[str, set] = {}
-    for index, connectivity in enumerate(connectivity_keys):
-        connectivity_to_groups.setdefault(connectivity, set()).add(group_ids[index])
-    aliases: Dict[str, str] = {}
-    for connectivity, members in connectivity_to_groups.items():
-        canonical = sorted(members)[0]
-        for member in members:
-            aliases[member] = canonical
-    group_ids = [aliases.get(group, group) for group in group_ids]
-    return tuple(group_ids), tuple(connectivity_keys)
+    # Connectivity identity is a stronger boundary than an accidental cluster
+    # split. Merge transitively because one Butina cluster can connect variants
+    # from more than one connectivity identity.
+    merged_group_ids = _merge_group_ids_by_connectivity(group_ids, connectivity_keys)
+    return merged_group_ids, tuple(connectivity_keys)
 
 
 def _greedy_assign_groups(
@@ -193,6 +245,7 @@ def _build_group_split(
     names: Tuple[str, ...],
     seed: int,
     similarity_threshold: float,
+    fixed_group_ids: Sequence[str] | None = None,
 ) -> SplitManifest:
     matrix = np.asarray(labels, dtype=float)
     if matrix.ndim != 2 or matrix.shape[0] != len(smiles):
@@ -205,6 +258,10 @@ def _build_group_split(
         raise ValueError("Split ratios must be positive, named, and sum to one")
 
     group_ids, connectivity_keys = chemical_groups(smiles, similarity_threshold)
+    if fixed_group_ids is not None:
+        if len(fixed_group_ids) != len(smiles):
+            raise ValueError("Fixed groups must align with SMILES")
+        group_ids = tuple(fixed_group_ids)
     grouped: Dict[str, List[int]] = {}
     for index, group_id in enumerate(group_ids):
         grouped.setdefault(group_id, []).append(index)
@@ -262,6 +319,7 @@ def chemical_group_split(
     ratios: Tuple[float, float, float] = (0.70, 0.15, 0.15),
     seed: int = 42,
     similarity_threshold: float = 0.6,
+    fixed_group_ids: Sequence[str] | None = None,
 ) -> SplitManifest:
     if len(ratios) != 3 or any(value <= 0 for value in ratios) or not np.isclose(sum(ratios), 1.0):
         raise ValueError("Split ratios must contain three positive values summing to one")
@@ -272,6 +330,7 @@ def chemical_group_split(
         names=("train", "validation", "test"),
         seed=seed,
         similarity_threshold=similarity_threshold,
+        fixed_group_ids=fixed_group_ids,
     )
 
 
@@ -307,6 +366,7 @@ def chemical_group_folds(
     fold_count: int = 5,
     seed: int = 42,
     similarity_threshold: float = 0.6,
+    fixed_group_ids: Sequence[str] | None = None,
 ) -> FoldManifest:
     """Build deterministic multilabel-balanced folds without splitting chemical groups."""
     matrix = np.asarray(labels, dtype=float)
@@ -315,6 +375,10 @@ def chemical_group_folds(
     if matrix.ndim != 2 or matrix.shape[0] != len(smiles):
         raise ValueError("Labels must be aligned with SMILES")
     group_ids, connectivity_keys = chemical_groups(smiles, similarity_threshold)
+    if fixed_group_ids is not None:
+        if len(fixed_group_ids) != len(smiles):
+            raise ValueError("Fixed groups must align with SMILES")
+        group_ids = tuple(fixed_group_ids)
     grouped: Dict[str, List[int]] = {}
     for index, group_id in enumerate(group_ids):
         grouped.setdefault(group_id, []).append(index)

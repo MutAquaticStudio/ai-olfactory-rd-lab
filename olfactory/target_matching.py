@@ -74,7 +74,7 @@ def maturity_from_support(
         and assessed_negative_support >= SUPPORTED_POSITIVES
     ):
         return DescriptorMaturity.SUPPORTED
-    if positive_support >= LIMITED_POSITIVES:
+    if positive_support >= LIMITED_POSITIVES and assessed_negative_support >= LIMITED_POSITIVES:
         return DescriptorMaturity.LIMITED_EVIDENCE
     return DescriptorMaturity.INSUFFICIENT
 
@@ -141,6 +141,11 @@ def evaluate_target_match(
         raise ValueError("At least one target descriptor is required")
     if any(item.maturity is DescriptorMaturity.INSUFFICIENT for item in evidence):
         raise ValueError("Insufficient-evidence descriptors cannot be target conditions")
+    calibrated = calibrated and all(
+        item.calibration_method.lower() not in {"", "uncalibrated"}
+        and not item.calibration_method.upper().startswith("UNCALIBRATED")
+        for item in evidence
+    )
     factor = float(np.clip(relaxation_factor, 0.0, 1.0))
     conservative = [
         conservative_probability(probability, uncertainty)

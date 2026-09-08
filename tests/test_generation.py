@@ -175,7 +175,8 @@ def test_review_found_and_unverified_never_reach_shortlist():
         candidate("CCCCO", ChemicalDecision.PASS, NoveltyStatus.FOUND),
         candidate("CCOC", ChemicalDecision.PASS, NoveltyStatus.UNVERIFIED),
     ]
-    ranked = rank_candidates(model, labels, ["label-0", "label-1"], candidates)
+    ranked = rank_candidates(model, labels, ["label-0", "label-1"], candidates,
+                             descriptor_metadata=generation_module.descriptor_evidence(labels, [50] * 113, [50] * 113))
     assert len(ranked) == 1
     assert ranked[0].isomeric_smiles == "CCO"
     assert ranked[0].target_fit == pytest.approx(0.5)

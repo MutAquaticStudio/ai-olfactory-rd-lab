@@ -100,13 +100,23 @@ def main() -> None:
         table.presence[validation],
         morgan_calibration.transform_logits(validation_logits),
     )
-    morgan_metrics = multilabel_metrics(table.presence[test], morgan_calibration.transform_logits(test_logits))
+    logistic_test_probabilities = logistic_calibration.transform_logits(logits(logistic_test))
+    morgan_test_probabilities = morgan_calibration.transform_logits(test_logits)
+    morgan_metrics = multilabel_metrics(table.presence[test], morgan_test_probabilities)
 
     run_id = f"baseline-ladder-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-s{args.seed}"
     run_dir = args.artifact_root / "baselines" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     weights_path = run_dir / "morgan_baseline_weights.pth"
     torch.save(morgan.model.state_dict(), weights_path)
+    predictions_path = run_dir / "raw_predictions.npz"
+    np.savez_compressed(
+        predictions_path,
+        locked_test_indices=np.asarray(test, dtype=np.int64),
+        locked_test_targets=table.presence[test].astype(np.float32),
+        logistic_probabilities=logistic_test_probabilities.astype(np.float32),
+        morgan_probabilities=morgan_test_probabilities.astype(np.float32),
+    )
     manifest = {
         "run_id": run_id,
         "model_family": "judge-baseline-ladder",
@@ -129,6 +139,9 @@ def main() -> None:
             "weights_path": str(weights_path),
             "weights_sha256": sha256_file(weights_path),
         },
+        "raw_predictions_path": str(predictions_path),
+        "raw_predictions_sha256": sha256_file(predictions_path),
+        "locked_test_status": "EXPOSED_RETROSPECTIVE_TEST",
         "status": "BASELINE_BENCHMARK",
     }
     output = run_dir / "manifest.json"

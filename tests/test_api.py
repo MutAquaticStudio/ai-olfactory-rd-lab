@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+import numpy as np
+import pytest
 import torch
 from fastapi.testclient import TestClient
 from rdkit import Chem
@@ -15,6 +18,7 @@ from olfactory.generation import (
     ReviewCandidate,
 )
 from olfactory.models import OdorPredictor, SMILES_LSTM
+from olfactory.prediction import PredictionBatch
 from olfactory.pubchem import NoveltyResult, NoveltyStatus
 from olfactory.references import (
     PubChemProvider,
@@ -68,6 +72,38 @@ class RecordingExternalCatalog:
         )
 
 
+class RecordingShadowPredictor:
+    def __init__(self, labels):
+        self.label_names = tuple(labels)
+        self.calls = []
+        self.identity = SimpleNamespace(
+            model_version="judge-v2-shadow-test",
+            dataset_version="legacy-clean-3522",
+            calibration_version="ensemble-platt-tier-v1",
+        )
+        self.calibration = SimpleNamespace(thresholds=tuple(0.3 for _ in labels))
+        self.gate_summary = {
+            "status": "SHADOW_ONLY",
+            "eligible": False,
+            "blocked_reasons": ["intensity_mae_not_evaluable"],
+            "external_blockers": ["locked_test_exposed"],
+        }
+
+    def predict(self, smiles):
+        self.calls.append(tuple(smiles))
+        shape = (len(smiles), len(self.label_names))
+        return PredictionBatch(
+            model_version=self.identity.model_version,
+            dataset_version=self.identity.dataset_version,
+            calibration_version=self.identity.calibration_version,
+            presence_probability=np.full(shape, 0.2, dtype=np.float32),
+            expected_intensity=np.full(shape, np.nan, dtype=np.float32),
+            ensemble_uncertainty=np.full(shape, 0.03, dtype=np.float32),
+            training_similarity=np.full((len(smiles),), 0.72, dtype=np.float32),
+            reliability_state=tuple("IN_DOMAIN" for _ in smiles),
+            label_names=self.label_names,
+        )
+
 def make_resources():
     mapping = json.loads(
         (ROOT / "data" / "odor_taxonomy_mapping_v1_2.json").read_text(encoding="utf-8")
@@ -86,6 +122,7 @@ def make_resources():
         idx_to_char=("<PAD>", "<END>", "C"),
         existing_isomeric_smiles_set=set(),
         pubchem_client=RecordingPubChem(),
+        descriptor_evidence=api_module.descriptor_evidence(labels, [50] * len(labels), [50] * len(labels)),
     )
 
 
@@ -96,7 +133,12 @@ def test_health_and_meta_expose_stable_contract():
         meta = client.get("/api/v1/meta")
 
     assert health.status_code == 200
-    assert health.json() == {"status": "ready", "ready": True, "resource_error": None}
+    assert health.json() == {
+        "status": "ready",
+        "ready": True,
+        "resource_error": None,
+        "judge_shadow": {"status": "DISABLED", "error_code": None},
+    }
     assert meta.status_code == 200
     body = meta.json()
     assert len(body["label_names"]) == 113
@@ -129,6 +171,7 @@ def test_health_and_meta_expose_stable_contract():
     assert reference["providers"][0]["enabled"] is True
     assert reference["providers"][1]["license_status"] == "NOT_CONFIGURED"
     assert reference["providers"][2]["license_status"] == "NOT_CONFIGURED"
+    assert body["models"]["judge_shadow"]["status"] == "DISABLED"
 
 
 def test_analysis_returns_structure_screen_predictions_and_taxonomy():
@@ -151,6 +194,35 @@ def test_analysis_returns_structure_screen_predictions_and_taxonomy():
     assert body["reference_checks"] == []
     assert body["reference_gate"]["status"] == "NOT_RUN"
     assert body["academic_evidence"]["status"] == "NO_EXACT_EVIDENCE"
+    assert body["shadow_prediction"] is None
+
+
+def test_analysis_exposes_shadow_only_as_additive_prediction_contract():
+    resources = make_resources()
+    shadow = RecordingShadowPredictor(resources.label_names)
+    resources.shadow_predictor = shadow
+    with TestClient(create_app(resources=resources)) as client:
+        response = client.post("/api/v1/analysis", json={"smiles": "CCO"})
+        meta = client.get("/api/v1/meta")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["prediction_v2"]["model_version"] == "judge-v1-legacy"
+    assert body["shadow_prediction"]["model_status"] == "SHADOW_ONLY"
+    assert body["shadow_prediction"]["calibrated"] is True
+    assert body["shadow_prediction"]["presence_predictions"][0] == {
+        "name": resources.label_names[0],
+        "probability": pytest.approx(0.2),
+        "expected_intensity": None,
+        "uncertainty": pytest.approx(0.03),
+        "calibration_method": None,
+        "decision_threshold": pytest.approx(0.3),
+    }
+    assert shadow.calls == [("CCO",)]
+    shadow_meta = meta.json()["models"]["judge_shadow"]
+    assert shadow_meta["production_usage"] == "ANALYSIS_TECHNICAL_DETAILS_ONLY"
+    assert shadow_meta["gate"]["eligible"] is False
+    assert shadow_meta["gate"]["blocked_reasons"] == ["intensity_mae_not_evaluable"]
 
 
 def test_invalid_smiles_uses_stable_error_shape():
@@ -240,6 +312,7 @@ def test_resource_failure_is_degraded_without_exposing_paths(monkeypatch):
         "status": "degraded",
         "ready": False,
         "resource_error": "FileNotFoundError",
+        "judge_shadow": {"status": "DISABLED", "error_code": None},
     }
     assert meta.status_code == 503
     assert "/private/model/path" not in meta.text

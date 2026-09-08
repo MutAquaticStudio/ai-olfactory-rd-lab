@@ -971,7 +971,7 @@ def rank_candidates(
     if descriptor_metadata is None:
         descriptor_metadata = descriptor_evidence(
             label_names,
-            [10] * len(label_names),
+            [0] * len(label_names),
             [0] * len(label_names),
         )
     metadata_by_label = {item.name: item for item in descriptor_metadata}

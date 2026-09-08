@@ -10,7 +10,9 @@ def test_source_registry_pins_commits_and_separates_quality_tiers():
     assert len(registry["pyrfume_data_commit"]) == 40
     assert registry["archives"]["leffingwell"]["quality_tier"] == "WEAK_LABEL_CATALOG"
     assert registry["archives"]["keller_2016"]["quality_tier"] == "QUANTITATIVE_PANEL_REPLICATED"
-    assert all(source["license_status"] == "REVIEW_REQUIRED" for source in registry["archives"].values())
+    assert registry["archives"]["dravnieks_1985"]["license_status"] == "REVIEW_REQUIRED"
+    assert registry["archives"]["keller_2016"]["license_status"] == "APPROVED"
+    assert registry["archives"]["keller_2016"]["license_evidence_url"].startswith("https://link.springer.com/")
 
 
 def test_mirroring_is_blocked_before_license_review(tmp_path):

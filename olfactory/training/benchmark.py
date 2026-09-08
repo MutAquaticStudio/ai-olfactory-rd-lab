@@ -54,7 +54,8 @@ def build_benchmark_manifest(
     fold_count: int = 5,
 ) -> Dict[str, object]:
     """Create the fixed 60/10/15/15 split plus development CV folds."""
-    labels = np.nan_to_num(table.presence, nan=0.0)
+    # Counts for stratification only; keep PRESENT and assessed ABSENT separate.
+    labels = np.concatenate((table.presence == 1, table.presence == 0), axis=1).astype(float)
     split = chemical_group_calibrated_split(
         table.smiles,
         labels,
@@ -63,7 +64,6 @@ def build_benchmark_manifest(
     )
     development = (
         list(split.train_indices)
-        + list(split.calibration_indices)
         + list(split.validation_indices)
     )
     folds = chemical_group_folds(
@@ -72,9 +72,11 @@ def build_benchmark_manifest(
         fold_count=fold_count,
         seed=seed,
         similarity_threshold=similarity_threshold,
+        fixed_group_ids=[split.group_ids[index] for index in development],
     )
     payload = split_manifest_payload(split, table=table, dataset_version=dataset_version)
     payload["development_indices"] = development
+    payload["cv_policy"] = "TRAIN_PLUS_VALIDATION_ONLY_V2"
     payload["development_folds"] = [
         [development[local_index] for local_index in fold] for fold in folds.folds
     ]
@@ -115,6 +117,8 @@ def save_immutable_manifest(path: Path, payload: Mapping[str, object]) -> Path:
 
 def load_immutable_manifest(path: Path, *, table: MolecularTargetTable | None = None) -> Dict[str, object]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("purpose") == "AUDIT_ONLY":
+        raise ValueError("AUDIT_ONLY split cannot be used for model training")
     required = {"schema_version", "dataset_version", "dataset_sha256", "split_hash", "train_indices", "validation_indices", "test_indices"}
     missing = required - set(payload)
     if int(payload.get("schema_version", 1)) >= 2 and "calibration_indices" not in payload:
@@ -160,6 +164,8 @@ def assert_no_leakage(payload: Mapping[str, object]) -> None:
     if "calibration_indices" in payload:
         partition_keys.append("calibration_indices")
     partition_keys.extend(("validation_indices", "test_indices"))
+    if any(len(payload[key]) != len(set(payload[key])) for key in partition_keys):
+        raise ValueError("Duplicate row in benchmark partition")
     partitions = [set(payload[key]) for key in partition_keys]
     if any(left & right for index, left in enumerate(partitions) for right in partitions[index + 1 :]):
         raise ValueError("Benchmark partitions overlap")

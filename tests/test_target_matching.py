@@ -13,7 +13,7 @@ from olfactory.target_matching import (
 
 
 def test_maturity_does_not_count_unassessed_rows_as_negative_support():
-    assert maturity_from_support(80, 0) is DescriptorMaturity.LIMITED_EVIDENCE
+    assert maturity_from_support(80, 0) is DescriptorMaturity.INSUFFICIENT
     assert maturity_from_support(80, 50) is DescriptorMaturity.SUPPORTED
     assert maturity_from_support(9, 500) is DescriptorMaturity.INSUFFICIENT
 
@@ -49,7 +49,7 @@ def test_supported_targets_require_each_target_and_geometric_fit_gate():
 
 def test_limited_label_uses_its_calibration_threshold_not_absolute_thirty_percent():
     evidence = descriptor_evidence(
-        ["musk"], [20], [0], [0.12], ["rare_tier_platt"]
+        ["musk"], [20], [10], [0.12], ["rare_tier_platt"]
     )
     match = evaluate_target_match(
         [0.15], [0.0], evidence,

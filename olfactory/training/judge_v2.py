@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import hashlib
 import csv
+import importlib.metadata
 import json
 import math
 import random
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
-from rdkit import Chem
+from rdkit import Chem, rdBase
 from torch import nn
 from torch.nn import functional as F
 
@@ -174,6 +175,7 @@ def _module_class(label_count: int, positive_weights: torch.Tensor, intensity_we
             self.presence_head = nn.Linear(JUDGE_V2_ARCHITECTURE["shared_hidden"], label_count)
             self.intensity_head = nn.Linear(JUDGE_V2_ARCHITECTURE["shared_hidden"], label_count)
             self.register_buffer("positive_weights", positive_weights.float())
+            self.validation_epoch_batches: List[Tuple[torch.Tensor, ...]] = []
 
         def forward(self, bmg, atom_descriptors=None, molecule_descriptors=None):
             atom_states = self.message_passing(bmg, atom_descriptors)
@@ -203,6 +205,15 @@ def _module_class(label_count: int, positive_weights: torch.Tensor, intensity_we
             self.log(f"{stage}_loss", loss, prog_bar=True, on_epoch=True, batch_size=len(targets))
             self.log(f"{stage}_presence_loss", parts["presence_loss"], on_epoch=True, batch_size=len(targets))
             self.log(f"{stage}_intensity_loss", parts["intensity_loss"], on_epoch=True, batch_size=len(targets))
+            if stage == "validation":
+                self.validation_epoch_batches.append(
+                    (
+                        presence_logits.detach().cpu(),
+                        intensity_predictions.detach().cpu(),
+                        presence_targets.detach().cpu(),
+                        intensity_targets.detach().cpu(),
+                    )
+                )
             return loss
 
         def training_step(self, batch, batch_index):
@@ -210,6 +221,9 @@ def _module_class(label_count: int, positive_weights: torch.Tensor, intensity_we
 
         def validation_step(self, batch, batch_index):
             return self._step(batch, "validation")
+
+        def on_validation_epoch_start(self) -> None:
+            self.validation_epoch_batches.clear()
 
         def configure_optimizers(self):
             return torch.optim.AdamW(self.parameters(), lr=1e-3, weight_decay=1e-5)
@@ -225,7 +239,9 @@ def _predict(model, loader, label_count: int, device: torch.device):
     with torch.inference_mode():
         for batch in loader:
             bmg, atom_descriptors, molecule_descriptors, batch_targets, _, _, _ = batch
-            bmg = bmg.to(device)
+            # Chemprop BatchMolGraph.to() mutates in place and returns None.
+            # Assigning its return value discards the graph before inference.
+            bmg.to(device)
             atom_descriptors = atom_descriptors.to(device) if atom_descriptors is not None else None
             molecule_descriptors = molecule_descriptors.to(device) if molecule_descriptors is not None else None
             presence_logits, intensity = model(bmg, atom_descriptors, molecule_descriptors)
@@ -234,6 +250,28 @@ def _predict(model, loader, label_count: int, device: torch.device):
             targets.append(batch_targets.cpu().numpy())
     matrix = np.concatenate(targets)
     return np.concatenate(logits), np.concatenate(intensities), matrix[:, :label_count], matrix[:, label_count:]
+
+
+def resolve_chemprop_accelerator(requested: str = "cpu") -> str:
+    """Resolve a deterministic Lightning accelerator for Chemprop training.
+
+    Chemprop's bond message passing uses ``scatter_reduce``. PyTorch does not
+    currently provide a deterministic MPS implementation for that operation,
+    so scientific benchmark runs must not silently select Apple MPS.
+    """
+    value = str(requested).strip().lower()
+    if value == "cpu":
+        return "cpu"
+    if value == "gpu":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA accelerator was requested but is not available")
+        return "gpu"
+    if value == "mps":
+        raise ValueError(
+            "Deterministic Chemprop training is not supported on MPS because "
+            "scatter_reduce_mps has no deterministic implementation; use CPU."
+        )
+    raise ValueError("Chemprop accelerator must be 'cpu', 'gpu', or 'mps'")
 
 
 def train_judge_v2(
@@ -246,6 +284,8 @@ def train_judge_v2(
     intensity_weight: float = 0.3,
     max_epochs: int = 100,
     patience: int = 20,
+    accelerator: str = "cpu",
+    evaluation_partition_status: str = "EXPOSED_RETROSPECTIVE_TEST",
 ) -> Dict[str, object]:
     try:
         from lightning import pytorch as pl
@@ -305,13 +345,13 @@ def train_judge_v2(
         def on_validation_epoch_end(self, trainer, pl_module) -> None:
             if trainer.sanity_checking:
                 return
-            current_device = pl_module.device
-            logits, intensity_values, presence_values, intensity_targets = _predict(
-                pl_module,
-                validation_loader,
-                len(table.label_names),
-                current_device,
-            )
+            batches = pl_module.validation_epoch_batches
+            if not batches:
+                return
+            logits = torch.cat([batch[0] for batch in batches]).numpy()
+            intensity_values = torch.cat([batch[1] for batch in batches]).numpy()
+            presence_values = torch.cat([batch[2] for batch in batches]).numpy()
+            intensity_targets = torch.cat([batch[3] for batch in batches]).numpy()
             presence_metrics = multilabel_metrics(
                 presence_values,
                 1.0 / (1.0 + np.exp(-logits)),
@@ -335,15 +375,10 @@ def train_judge_v2(
                     "validation_intensity_mae": float(current_intensity["masked_mae"]),
                 }
             )
-    if torch.cuda.is_available():
-        accelerator = "gpu"
-    elif torch.backends.mps.is_available():
-        accelerator = "mps"
-    else:
-        accelerator = "cpu"
+    resolved_accelerator = resolve_chemprop_accelerator(accelerator)
     trainer = pl.Trainer(
         max_epochs=max_epochs,
-        accelerator=accelerator,
+        accelerator=resolved_accelerator,
         devices=1,
         deterministic=True,
         logger=False,
@@ -353,7 +388,7 @@ def train_judge_v2(
     trainer.fit(model, train_loader, validation_loader)
     state = torch.load(checkpoint.best_model_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["state_dict"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cuda" if resolved_accelerator == "gpu" else "cpu")
     model.to(device)
 
     calibration_logits, calibration_intensity, calibration_presence, calibration_intensity_target = _predict(
@@ -423,6 +458,7 @@ def train_judge_v2(
                 "intensity_weight": intensity_weight,
                 "max_epochs": max_epochs,
                 "patience": patience,
+                "accelerator": resolved_accelerator,
             },
             indent=2,
             sort_keys=True,
@@ -433,6 +469,25 @@ def train_judge_v2(
     split_path.write_text(json.dumps(split.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
     metrics_path = run_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+    predictions_path = run_dir / "raw_predictions.npz"
+    np.savez_compressed(
+        predictions_path,
+        calibration_indices=np.asarray(calibration_indices, dtype=np.int64),
+        calibration_logits=calibration_logits.astype(np.float32),
+        calibration_intensity=calibration_intensity.astype(np.float32),
+        calibration_presence=calibration_presence.astype(np.float32),
+        calibration_intensity_targets=calibration_intensity_target.astype(np.float32),
+        validation_indices=np.asarray(split.validation_indices, dtype=np.int64),
+        validation_logits=validation_logits.astype(np.float32),
+        validation_intensity=validation_intensity.astype(np.float32),
+        validation_presence=validation_presence.astype(np.float32),
+        validation_intensity_targets=validation_intensity_target.astype(np.float32),
+        locked_test_indices=np.asarray(split.test_indices, dtype=np.int64),
+        locked_test_logits=test_logits.astype(np.float32),
+        locked_test_intensity=test_intensity.astype(np.float32),
+        locked_test_presence=test_presence.astype(np.float32),
+        locked_test_intensity_targets=test_intensity_target.astype(np.float32),
+    )
     learning_json_path = run_dir / "learning_curve.json"
     learning_csv_path = run_dir / "learning_curve.csv"
     learning_png_path = run_dir / "learning_curve.png"
@@ -471,16 +526,24 @@ def train_judge_v2(
         "seed": seed,
         "intensity_weight": intensity_weight,
         "git_commit": _git_commit(root),
+        "runtime_versions": {
+            "python": sys.version.split()[0],
+            "torch": torch.__version__,
+            "rdkit": rdBase.rdkitVersion,
+            "chemprop": importlib.metadata.version("chemprop"),
+        },
         "calibration_version": calibration.calibration_version,
-        "weights_path": str(weights_path),
+        "weights_path": weights_path.name,
         "weights_sha256": sha256_file(weights_path),
-        "calibration_path": str(calibration_path),
+        "calibration_path": calibration_path.name,
         "calibration_sha256": sha256_file(calibration_path),
-        "descriptor_evidence_path": str(descriptor_path),
+        "descriptor_evidence_path": descriptor_path.name,
         "descriptor_evidence_sha256": sha256_file(descriptor_path),
-        "config_path": str(config_path),
-        "split_path": str(split_path),
-        "metrics_path": str(metrics_path),
+        "config_path": config_path.name,
+        "split_path": split_path.name,
+        "metrics_path": metrics_path.name,
+        "raw_predictions_path": predictions_path.name,
+        "raw_predictions_sha256": sha256_file(predictions_path),
         "checksums": {
             str(path.name): sha256_file(path)
             for path in (
@@ -490,15 +553,18 @@ def train_judge_v2(
                 config_path,
                 split_path,
                 metrics_path,
+                predictions_path,
                 learning_json_path,
                 learning_csv_path,
                 learning_png_path,
             )
         },
         "metrics": metrics,
-        "learning_curve_path": str(learning_png_path),
+        "learning_curve_path": learning_png_path.name,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "CANDIDATE",
+        "status": "SHADOW_CANDIDATE",
+        "locked_test_status": evaluation_partition_status,
+        "production_promoted": False,
     }
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(
@@ -511,6 +577,7 @@ def train_judge_v2(
         Path(artifact_root) / "tracking",
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    manifest["manifest_path"] = str(manifest_path.resolve())
     return manifest
 
 

@@ -19,7 +19,9 @@ the API. `PredictionBatch` carries 113 presence probabilities, optional
 intensity, ensemble uncertainty, nearest-training similarity, reliability, and
 model/data/calibration versions. `LegacyMorganPredictor` adapts the unchanged
 production weights. A graph model must implement the same contract before it
-can be loaded in shadow mode.
+can be loaded in shadow mode. The optional Chemprop five-seed adapter is loaded
+only when `SCENT_STUDIO_JUDGE_SHADOW_MANIFEST` points to a checksum-verified
+ensemble. It is analysis-only and does not participate in candidate ranking.
 
 `EnsemblePredictor` combines independently seeded members by mean probability
 and reports their standard deviation as uncertainty; it does not silently
@@ -57,7 +59,8 @@ python train_deepchem_judge.py --legacy-baseline \
   --split-manifest artifacts/benchmarks/split_manifest.json
 ```
 
-No artifact overwrites the v1 weights. The registry pointer is the rollback
+No artifact overwrites the v1 weights. Shadow loading does not modify the
+production registry. The registry pointer is the rollback
 mechanism; a candidate is not promoted unless macro AP, bootstrap delta, micro
 AP retention, calibration, intensity MAE, and prospective sensory gates all
 pass on the locked benchmark.

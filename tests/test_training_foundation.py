@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 from rdkit import Chem
+import benchmark_judge_v2 as cv_module
 
 from olfactory.training.calibration import CalibrationBundle
 from olfactory.training.baselines import train_masked_morgan_mlp
@@ -14,11 +15,16 @@ from olfactory.training.creator_v2 import (
     target_alignment_benchmark,
     target_condition_vector,
 )
-from olfactory.training.judge_v2 import effective_positive_weights, masked_multitask_loss
+from olfactory.training.judge_v2 import (
+    effective_positive_weights,
+    masked_multitask_loss,
+    resolve_chemprop_accelerator,
+)
 from olfactory.training.gates import creator_promotion_gate, judge_promotion_gate
 from olfactory.training.metrics import intensity_metrics, multilabel_metrics
 from olfactory.training.registry import ModelRegistry, sha256_file
 from olfactory.training.splits import (
+    _merge_group_ids_by_connectivity,
     chemical_group_calibrated_split,
     chemical_group_folds,
     chemical_group_split,
@@ -55,6 +61,15 @@ def test_chemical_split_is_deterministic_and_blocks_connectivity_leakage():
     assert set(first.train_indices).isdisjoint(first.test_indices)
 
 
+def test_connectivity_group_merge_is_transitive():
+    merged = _merge_group_ids_by_connectivity(
+        ("cluster-a", "cluster-b", "cluster-b", "cluster-c"),
+        ("connectivity-1", "connectivity-1", "connectivity-2", "connectivity-2"),
+    )
+
+    assert len(set(merged)) == 1
+
+
 def test_grouped_five_fold_split_is_deterministic_and_complete():
     smiles = ["CCO", "OCC", "CCN", "CCC", "c1ccccc1", "Cc1ccccc1", "C1CCCCC1", "CCCl", "CCBr", "CCF"]
     labels = np.eye(len(smiles), 3, dtype=float)
@@ -67,6 +82,46 @@ def test_grouped_five_fold_split_is_deterministic_and_complete():
         for row in fold:
             membership.setdefault(first.group_ids[row], set()).add(fold_index)
     assert all(len(folds) == 1 for folds in membership.values())
+
+
+def test_cv_fold_uses_outer_holdout_and_all_remaining_rows(monkeypatch):
+    table = type(
+        "Table",
+        (),
+        {
+            "smiles": tuple("C" for _ in range(10)),
+            "presence": np.zeros((10, 2), dtype=float),
+        },
+    )()
+    inner = cv_module.SplitManifest(
+        train_indices=(0, 1, 2, 3, 4, 5),
+        validation_indices=(6,),
+        test_indices=(7,),
+        group_ids=tuple(),
+        seed=1,
+        ratios=(0.75, 0.125, 0.125),
+        similarity_threshold=0.6,
+        split_hash="inner",
+    )
+    monkeypatch.setattr(cv_module, "chemical_group_split", lambda *_args, **_kwargs: inner)
+    folds = ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+
+    split = cv_module.fold_split(table, list(range(10)), folds, 0, 11)
+
+    partitions = (
+        set(split.train_indices),
+        set(split.calibration_indices),
+        set(split.validation_indices),
+        set(split.test_indices),
+    )
+    assert set().union(*partitions) == set(range(10))
+    assert all(
+        not left & right
+        for index, left in enumerate(partitions)
+        for right in partitions[index + 1 :]
+    )
+    assert split.test_indices == (0, 1)
+    assert len(split.train_indices) == 6
 
 
 def test_calibrated_split_has_four_disjoint_chemical_partitions():
@@ -172,6 +227,12 @@ def test_judge_v2_loss_masks_unknown_presence_and_intensity():
     assert parts["intensity_loss"] > 0
 
 
+def test_chemprop_accelerator_defaults_to_deterministic_cpu():
+    assert resolve_chemprop_accelerator() == "cpu"
+    with pytest.raises(ValueError, match="not supported on MPS"):
+        resolve_chemprop_accelerator("mps")
+
+
 def test_conditional_creator_contract_and_robust_fit_penalty():
     model = ConditionalSELFIESTransformer(
         vocab_size=12,
@@ -258,11 +319,13 @@ def test_promotion_gates_require_calibration_intensity_and_blind_panel():
             "macro_average_precision_supported": 0.30,
             "micro_average_precision": 0.43,
             "mean_label_ece": 0.08,
+            "mean_brier": 0.10,
         },
         {
             "macro_average_precision_supported": 0.34,
             "micro_average_precision": 0.425,
             "mean_label_ece": 0.07,
+            "mean_brier": 0.09,
         },
         bootstrap_macro_delta_lower=0.01,
         baseline_intensity_mae=2.0,
@@ -279,6 +342,30 @@ def test_promotion_gates_require_calibration_intensity_and_blind_panel():
     )
     assert not creator.eligible
     assert "blind_panel" in creator.blocked_reasons
+
+
+def test_judge_gate_marks_missing_intensity_as_not_evaluable():
+    decision = judge_promotion_gate(
+        {
+            "macro_average_precision_supported": 0.30,
+            "micro_average_precision": 0.32,
+            "mean_label_ece": 0.02,
+        },
+        {
+            "macro_average_precision_supported": 0.35,
+            "micro_average_precision": 0.36,
+            "mean_label_ece": 0.01,
+        },
+        bootstrap_macro_delta_lower=0.01,
+        baseline_intensity_mae=float("nan"),
+        candidate_intensity_mae=float("nan"),
+    )
+
+    intensity = next(check for check in decision.checks if check.name == "intensity_mae")
+    assert intensity.status == "NOT_EVALUABLE"
+    assert intensity.passed is None
+    assert not decision.eligible
+    assert "intensity_mae_not_evaluable" in decision.blocked_reasons
 
 
 def test_morgan_training_smoke_is_deterministic():

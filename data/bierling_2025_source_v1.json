@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source_id": "bierling_2025_crown",
+  "record_id": 15657278,
+  "record_version": "v3",
+  "doi": "10.5281/zenodo.15657278",
+  "record_url": "https://zenodo.org/records/15657278",
+  "metadata_url": "https://zenodo.org/api/records/15657278",
+  "article_url": "https://doi.org/10.1038/s41597-025-04644-2",
+  "license_id": "cc-by-4.0",
+  "license_review_date": "2026-09-08",
+  "license_review_basis": "License ID explicitly declared by Zenodo record API; preserve attribution to Bierling et al. (2025).",
+  "permission_scope": "Download and inspect published data for source-specific evidence review; not approval of training targets",
+  "protocol_review": "PENDING_DICTIONARY_AND_RAW_DATA_VALIDATION",
+  "training_eligible": false,
+  "files": {
+    "data.csv": {"md5": "2b0591617a6e806ee619c2c2466a03ed", "bytes": 4898146},
+    "odors.csv": {"md5": "b1332f4f21e065c11e905dce125eb5d9", "bytes": 9917},
+    "variables-dictionary.xlsx": {"md5": "c88411729c8f08d679485ffb56c9a078", "bytes": 24605}
+  }
+}

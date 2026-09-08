@@ -11,25 +11,24 @@ def krippendorff_alpha_nominal(values: np.ndarray) -> float:
     if ratings.ndim != 2:
         raise ValueError("Ratings must be units by assessors")
     disagreements = 0.0
-    pairs = 0.0
     observed_values = []
     for row in ratings:
         valid = row[np.isfinite(row)]
+        if len(valid) < 2:
+            continue
         observed_values.extend(valid.tolist())
-        for left in range(len(valid)):
-            for right in range(left + 1, len(valid)):
-                disagreements += float(valid[left] != valid[right])
-                pairs += 1.0
-    if pairs == 0:
-        return float("nan")
-    observed = disagreements / pairs
+        # Ordered coincidence pairs are weighted by 1/(m_u - 1), so units
+        # with more raters do not contribute quadratically more weight.
+        _, counts = np.unique(valid, return_counts=True)
+        disagreements += (len(valid) ** 2 - float((counts ** 2).sum())) / (len(valid) - 1)
     pooled = np.asarray(observed_values)
     if len(pooled) < 2:
         return float("nan")
-    probabilities = np.asarray([(pooled == value).mean() for value in np.unique(pooled)])
-    expected = 1.0 - float((probabilities**2).sum())
+    observed = disagreements / len(pooled)
+    _, counts = np.unique(pooled, return_counts=True)
+    expected = (len(pooled) ** 2 - float((counts ** 2).sum())) / (len(pooled) * (len(pooled) - 1))
     if expected == 0:
-        return 1.0 if observed == 0 else float("nan")
+        return float("nan")
     return float(1.0 - observed / expected)
 
 

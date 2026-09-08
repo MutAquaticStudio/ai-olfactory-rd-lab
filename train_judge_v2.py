@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +17,7 @@ from olfactory.training.benchmark import (
 )
 from olfactory.training.dataset import load_legacy_baseline, load_versioned_snapshot
 from olfactory.training.judge_v2 import train_judge_v2
+from olfactory.training.judge_ensemble import build_chemprop_ensemble_artifact
 from olfactory.resources import validate_resource_bundle
 
 
@@ -37,7 +37,22 @@ def parse_args():
     parser.add_argument("--intensity-weight", type=float, choices=(0.1, 0.3, 1.0), default=0.3)
     parser.add_argument("--max-epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument(
+        "--accelerator",
+        choices=("cpu", "gpu", "mps"),
+        default="cpu",
+        help=(
+            "Deterministic Chemprop training defaults to CPU. MPS is rejected "
+            "because its scatter_reduce operation is not deterministic."
+        ),
+    )
     parser.add_argument("--allow-pre-panel-data", action="store_true")
+    parser.add_argument(
+        "--baseline-manifest",
+        type=Path,
+        help="Baseline ladder manifest with row-aligned locked-test predictions",
+    )
+    parser.add_argument("--bootstrap-iterations", type=int, default=10_000)
     return parser.parse_args()
 
 
@@ -91,21 +106,19 @@ def main() -> None:
                 intensity_weight=args.intensity_weight,
                 max_epochs=args.max_epochs,
                 patience=args.patience,
+                accelerator=args.accelerator,
             )
         )
-    ensemble = {
-        "model_family": "judge-v2-ensemble",
-        "dataset_version": dataset_version,
-        "split_hash": split.split_hash,
-        "intensity_weight": args.intensity_weight,
-        "members": manifests,
-        "status": "CANDIDATE",
-        "promotion_note": "Locked-test and prospective-panel gates must pass before registry promotion.",
-    }
-    output = args.artifact_root / "judge" / f"ensemble-{split.split_hash[:12]}.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(ensemble, indent=2, sort_keys=True), encoding="utf-8")
-    print(f"Judge v2 candidate ensemble written to {output}")
+    ensemble = build_chemprop_ensemble_artifact(
+        table,
+        split,
+        [Path(str(item["manifest_path"])) for item in manifests],
+        args.artifact_root,
+        dataset_version=dataset_version,
+        baseline_manifest_path=args.baseline_manifest,
+        bootstrap_iterations=args.bootstrap_iterations,
+    )
+    print(f"Judge v2 shadow ensemble written to {ensemble['manifest_path']}")
 
 
 if __name__ == "__main__":

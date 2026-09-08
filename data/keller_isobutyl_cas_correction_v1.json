@@ -1,0 +1,21 @@
+{
+  "correction_id": "keller-isobutyl-acetate-cas-v1",
+  "parent_dataset_version": "keller-2016-trials-audit-v3",
+  "parent_manifest_sha256": "cbaeff3d0c9d8db20bd282531d48fcbcfef05c3f8af28a6db30046b8974ff14b",
+  "original_workbook_sha256": "efcb1b07558431c869c5578abcd3fa1e4405a38cc68a8b1c1621594c673d9f62",
+  "old_cas": "109-19-0",
+  "new_cas": "110-19-0",
+  "source_identifier": "109-19-0",
+  "source_names": ["isobutyl acetate"],
+  "expected_measurement_rows": 2860,
+  "expected_trials": 110,
+  "authorization": "EXPLICIT_USER_CAS_CORRECTION",
+  "authorized_at": "2026-09-08",
+  "authorization_reference": "User instruction: Ok sửa phần cas sai nhé",
+  "reason": "Correct the invalid source CAS check digit/name association using the reviewed manufacturer and PubChem evidence. CAS only; not a CID/SMILES repair or sensory/sample approval.",
+  "evidence_urls": [
+    "https://www.sigmaaldrich.com/US/en/product/sigald/537470",
+    "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/110-19-0/cids/JSON",
+    "https://www.cas.org/pt-br/training/documentation/chemical-substances/checkdig"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source_id": "bierling_2025_crown_author_code",
+  "record_id": 15657278,
+  "record_version": "v3",
+  "doi": "10.5281/zenodo.15657278",
+  "license_id": "cc-by-4.0",
+  "permission_scope": "Static inspection of published author notebook; never execute cells; no training approval",
+  "training_eligible": false,
+  "files": {
+    "analyses.ipynb": {"md5": "a174eec78525517b82094658f450503e", "bytes": 4378966}
+  }
+}

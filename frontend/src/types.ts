@@ -177,6 +177,8 @@ interface AnalysisBase {
   reference_gate: ReferenceGate;
   /** Additive field: older cached API fixtures may omit it. */
   academic_evidence?: AcademicEvidenceSummary | null;
+  shadow_prediction?: PredictionV2 | null;
+  shadow_prediction_error?: string | null;
 }
 
 export interface CompleteAnalysis extends AnalysisBase {

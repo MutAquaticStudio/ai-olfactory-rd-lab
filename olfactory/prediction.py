@@ -38,6 +38,7 @@ class PredictionBatch:
     training_similarity: np.ndarray
     reliability_state: Tuple[str, ...]
     label_names: Tuple[str, ...]
+    calibration_methods: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         probabilities = _float_array(self.presence_probability)
@@ -48,6 +49,8 @@ class PredictionBatch:
             raise ValueError("presence_probability must have shape (rows, label_count)")
         if len(self.label_names) != ODOR_LABEL_COUNT:
             raise ValueError(f"Predictors must expose exactly {ODOR_LABEL_COUNT} labels")
+        if self.calibration_methods and len(self.calibration_methods) != len(self.label_names):
+            raise ValueError("Calibration methods must align with label names")
         expected_shape = probabilities.shape
         for name, value in (("expected_intensity", intensity), ("ensemble_uncertainty", uncertainty)):
             if value.shape != expected_shape:
@@ -77,6 +80,7 @@ class PredictionBatch:
                             "probability": float(self.presence_probability[row, index]),
                             "expected_intensity": _finite_or_none(self.expected_intensity[row, index]),
                             "uncertainty": _finite_or_none(self.ensemble_uncertainty[row, index]),
+                            "calibration_method": self.calibration_methods[index] if self.calibration_methods else None,
                         }
                         for index, label in enumerate(self.label_names)
                     ],
@@ -175,6 +179,7 @@ class LegacyMorganPredictor:
             training_similarity=similarities,
             reliability_state=states,
             label_names=self.label_names,
+            calibration_methods=tuple(getattr(self.calibration, "methods", ())),
         )
 
 
@@ -206,6 +211,8 @@ class EnsemblePredictor:
             raise ValueError(
                 "All ensemble members must share dataset and calibration provenance"
             )
+        if len({batch.calibration_methods for batch in batches}) != 1:
+            raise ValueError("Ensemble members must share per-label calibration methods")
         values = np.stack([batch.presence_probability for batch in batches], axis=0)
         intensities = np.stack([batch.expected_intensity for batch in batches], axis=0)
         similarities = np.stack([batch.training_similarity for batch in batches], axis=0)
@@ -236,6 +243,7 @@ class EnsemblePredictor:
             training_similarity=mean_similarity,
             reliability_state=tuple(reliability_state(value if np.isfinite(value) else None) for value in mean_similarity),
             label_names=self.label_names,
+            calibration_methods=identity.calibration_methods,
         )
 
 

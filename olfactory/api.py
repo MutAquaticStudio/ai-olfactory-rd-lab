@@ -215,6 +215,9 @@ class AppResources:
         default_factory=UnavailableRetrosynthesisService
     )
     judge_calibration: Optional[CalibrationBundle] = None
+    shadow_predictor: Optional[MoleculePredictor] = None
+    shadow_error: Optional[str] = None
+    shadow_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         if self.reference_verifier is None:
@@ -235,14 +238,22 @@ class AppResources:
                 AcademicEvidenceStore(ACADEMIC_EVIDENCE_PATH)
             )
         if not self.descriptor_evidence:
-            # Tests and extensions that construct resources directly have no
-            # reviewed absence matrix. Keep labels selectable but explicitly
-            # limited rather than inventing assessed negatives.
+            # No support evidence means INSUFFICIENT, including in extensions.
             self.descriptor_evidence = descriptor_evidence(
                 self.label_names,
-                [10] * len(self.label_names),
+                [0] * len(self.label_names),
                 [0] * len(self.label_names),
             )
+
+
+def _shadow_error_code(error: Exception) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "SHADOW_MANIFEST_NOT_FOUND"
+    if isinstance(error, (ImportError, ModuleNotFoundError)):
+        return "SHADOW_RUNTIME_UNAVAILABLE"
+    if isinstance(error, (ValueError, KeyError, json.JSONDecodeError)):
+        return "SHADOW_ARTIFACT_INVALID"
+    return "SHADOW_LOAD_FAILED"
 
 
 def load_app_resources() -> AppResources:
@@ -336,6 +347,20 @@ def load_app_resources() -> AppResources:
         judge_calibration=calibration_bundle,
     )
     resources.data_service = DataFoundationService(label_names=label_names)
+    shadow_manifest = os.environ.get("SCENT_STUDIO_JUDGE_SHADOW_MANIFEST")
+    if shadow_manifest:
+        try:
+            from .training.judge_ensemble import load_chemprop_ensemble_predictor
+
+            shadow_predictor = load_chemprop_ensemble_predictor(
+                Path(shadow_manifest).expanduser()
+            )
+            if tuple(shadow_predictor.label_names) != tuple(label_names):
+                raise ValueError("Judge shadow labels do not match the production contract")
+            resources.shadow_predictor = shadow_predictor
+        except Exception as error:
+            # Shadow failure must never make the production Judge unavailable.
+            resources.shadow_error = _shadow_error_code(error)
     return resources
 
 
@@ -434,6 +459,62 @@ def _academic_evidence_payload(summary: object) -> Dict[str, object]:
     return to_dict()
 
 
+def _prediction_batch_payload(
+    batch: object,
+    *,
+    row: int,
+    model_status: str,
+    decision_thresholds: Optional[Sequence[float]] = None,
+    limitations: Sequence[str] = (),
+) -> Dict[str, object]:
+    probabilities = batch.presence_probability[row]
+    intensities = batch.expected_intensity[row]
+    uncertainties = batch.ensemble_uncertainty[row]
+    similarity = batch.training_similarity[row]
+    thresholds = tuple(decision_thresholds or ())
+    return {
+        "model_version": batch.model_version,
+        "dataset_version": batch.dataset_version,
+        "calibration_version": batch.calibration_version,
+        "model_status": model_status,
+        "calibrated": batch.calibration_version not in {"", "uncalibrated"} and not any(
+            method.upper().startswith("UNCALIBRATED") for method in batch.calibration_methods
+        ),
+        "calibration_methods": list(batch.calibration_methods),
+        "nearest_training_similarity": (
+            float(similarity) if np.isfinite(similarity) else None
+        ),
+        "reliability_state": batch.reliability_state[row],
+        "presence_predictions": [
+            {
+                "name": label,
+                "probability": float(probabilities[index]),
+                "calibration_method": batch.calibration_methods[index] if batch.calibration_methods else None,
+                "expected_intensity": (
+                    float(intensities[index]) if np.isfinite(intensities[index]) else None
+                ),
+                "uncertainty": (
+                    float(uncertainties[index]) if np.isfinite(uncertainties[index]) else None
+                ),
+                "decision_threshold": (
+                    float(thresholds[index]) if index < len(thresholds) else None
+                ),
+            }
+            for index, label in enumerate(batch.label_names)
+        ],
+        "limitations": list(limitations),
+        "presence_probability": [float(value) for value in probabilities],
+        "expected_intensity": [
+            float(value) if np.isfinite(value) else None for value in intensities
+        ],
+        "ensemble_uncertainty": [
+            float(value) if np.isfinite(value) else None for value in uncertainties
+        ],
+        "training_similarity": float(similarity) if np.isfinite(similarity) else None,
+        "reliability": batch.reliability_state[row],
+    }
+
+
 def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object]:
     normalized = raw_smiles.strip()
     with rdBase.BlockLogs():
@@ -460,6 +541,8 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
         "display_descriptors": display_descriptors(molecule, screen.descriptors),
         "predicted_odor_profile": None,
         "prediction_v2": None,
+        "shadow_prediction": None,
+        "shadow_prediction_error": None,
         "conformer_ensemble": None,
         "stereo_options": [],
         # Analysis never transmits identifiers without a dedicated consent flow.
@@ -529,6 +612,7 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
     prediction_payload.update(
         {
             "presence_probability": probability_values,
+            "calibration_methods": list(prediction_batch.calibration_methods),
             "expected_intensity": [
                 None if not np.isfinite(value) else float(value)
                 for value in prediction_batch.expected_intensity[0]
@@ -541,6 +625,29 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
             "reliability": prediction_payload["reliability_state"],
         }
     )
+    shadow_payload = None
+    shadow_error = None
+    if resources.shadow_predictor is not None:
+        try:
+            with resources.shadow_lock:
+                shadow_batch = resources.shadow_predictor.predict([isomeric_smiles])
+            shadow_calibration = getattr(resources.shadow_predictor, "calibration", None)
+            shadow_payload = _prediction_batch_payload(
+                shadow_batch,
+                row=0,
+                model_status="SHADOW_ONLY",
+                decision_thresholds=(
+                    shadow_calibration.thresholds if shadow_calibration is not None else None
+                ),
+                limitations=(
+                    "Shadow model output is not used for candidate ranking.",
+                    "Training labels are legacy weak catalog labels.",
+                    "Intensity is unavailable until reviewed panel data exists.",
+                    "The retrospective test partition has already been inspected.",
+                ),
+            )
+        except Exception:
+            shadow_error = "SHADOW_INFERENCE_FAILED"
     response.update(
         {
             "analysis_state": "COMPLETE",
@@ -565,6 +672,8 @@ def analyze_smiles(resources: AppResources, raw_smiles: str) -> Dict[str, object
                 ],
             },
             "prediction_v2": prediction_payload,
+            "shadow_prediction": shadow_payload,
+            "shadow_prediction_error": shadow_error,
         }
     )
     if resources.academic_evidence_service is not None:
@@ -821,11 +930,24 @@ def create_app(
 
     @application.get("/api/v1/health")
     async def health(request: Request):
-        ready = getattr(request.app.state, "resources", None) is not None
+        current = getattr(request.app.state, "resources", None)
+        ready = current is not None
+        shadow_status = "DISABLED"
+        shadow_error = None
+        if current is not None:
+            if current.shadow_predictor is not None:
+                shadow_status = "READY"
+            elif current.shadow_error is not None:
+                shadow_status = "LOAD_FAILED"
+                shadow_error = current.shadow_error
         return {
             "status": "ready" if ready else "degraded",
             "ready": ready,
             "resource_error": getattr(request.app.state, "resource_error", None),
+            "judge_shadow": {
+                "status": shadow_status,
+                "error_code": shadow_error,
+            },
         }
 
     @application.get("/api/v1/meta")
@@ -943,6 +1065,28 @@ def create_app(
                     "dataset_version": current.judge_identity.dataset_version,
                     "calibration_version": current.judge_identity.calibration_version,
                     "status": current.judge_identity.model_status,
+                },
+                "judge_shadow": {
+                    "enabled": current.shadow_predictor is not None,
+                    "status": (
+                        "READY"
+                        if current.shadow_predictor is not None
+                        else "LOAD_FAILED"
+                        if current.shadow_error is not None
+                        else "DISABLED"
+                    ),
+                    "error_code": current.shadow_error,
+                    "model_version": (
+                        getattr(getattr(current.shadow_predictor, "identity", None), "model_version", None)
+                    ),
+                    "dataset_version": (
+                        getattr(getattr(current.shadow_predictor, "identity", None), "dataset_version", None)
+                    ),
+                    "calibration_version": (
+                        getattr(getattr(current.shadow_predictor, "identity", None), "calibration_version", None)
+                    ),
+                    "production_usage": "ANALYSIS_TECHNICAL_DETAILS_ONLY",
+                    "gate": getattr(current.shadow_predictor, "gate_summary", None),
                 },
                 "creator": {
                     "model_version": str(current.creator_registry_entry.get("model_version", "creator-v1-legacy")),
