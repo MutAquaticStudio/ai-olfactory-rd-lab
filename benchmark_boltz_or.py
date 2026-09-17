@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Benchmark Boltz receptor-ligand binding evidence without touching production ranking.
 
-The default operation estimates cost only. Real compute requires --execute and a
-BOLTZ_API_KEY. A deterministic idempotency key is used per normalized receptor /
-ligand pair so a retry does not accidentally create duplicate compute.
+The default operation estimates cost only. Every Boltz request transmits the
+protein sequence and ligand SMILES to an external service, so explicit external
+consent is required even for estimation. Real compute additionally requires
+--execute, and a live key requires --allow-live. Deterministic idempotency keys
+prevent accidental duplicate compute for identical normalized pairs.
 """
 
 from __future__ import annotations
@@ -41,9 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, type=Path, help="CSV with receptor/ligand pairs")
     parser.add_argument("--output", required=True, type=Path, help="JSONL output path")
     parser.add_argument(
+        "--consent-external-boltz",
+        action="store_true",
+        help="Acknowledge that receptor sequences and ligand SMILES will be sent to Boltz.",
+    )
+    parser.add_argument(
         "--execute",
         action="store_true",
-        help="Submit paid/live or synthetic/test compute after estimating all rows.",
+        help="Submit model compute after estimating all rows. Without this flag only estimates are written.",
+    )
+    parser.add_argument(
+        "--allow-live",
+        action="store_true",
+        help="Permit --execute with a recognized live Boltz API key. Test keys do not need this flag.",
     )
     parser.add_argument(
         "--max-total-cost-usd",
@@ -199,11 +211,26 @@ def write_jsonl(path: Path, records: Iterable[Mapping[str, object]]) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if not args.consent_external_boltz:
+            raise ValueError(
+                "Boltz is an external service. Re-run with --consent-external-boltz only after "
+                "approving transmission of receptor sequences and ligand SMILES."
+            )
+        if args.max_total_cost_usd < 0:
+            raise ValueError("--max-total-cost-usd must be non-negative.")
         rows = validate_rows(load_rows(args.input, limit=args.limit))
         provider = build_boltz_provider_from_env()
         if provider is None:
             raise ValueError(
                 "BOLTZ_API_KEY is not configured. Use a workspace test key first; do not commit the key."
+            )
+        if provider.config.mode == "unknown":
+            raise ValueError(
+                "BOLTZ_API_KEY does not use a recognized test/live key prefix; refusing external compute."
+            )
+        if args.execute and provider.config.mode == "live" and not args.allow_live:
+            raise ValueError(
+                "A live Boltz key is configured. Add --allow-live only after reviewing the cost estimate and budget."
             )
         estimates, total_cost = estimate_all(provider, rows)
         print(
@@ -221,8 +248,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             write_jsonl(args.output, ({"estimate": item} for item in estimates))
             print(f"Cost estimates written to {args.output}")
             return 0
-        if args.max_total_cost_usd < 0:
-            raise ValueError("--max-total-cost-usd must be non-negative.")
         if total_cost > args.max_total_cost_usd:
             raise ValueError(
                 f"Estimated total {total_cost} USD exceeds local ceiling "
