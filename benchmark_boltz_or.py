@@ -14,7 +14,7 @@ from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import sys
-from typing import Dict, Iterable, List, Mapping
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 from olfactory.receptor_binding import (
     BoltzReceptorBindingProvider,
@@ -26,10 +26,15 @@ from olfactory.receptor_binding import (
 
 
 REQUIRED_COLUMNS = ("receptor_id", "receptor_sequence", "compound_id", "smiles")
-OPTIONAL_COLUMNS = ("experimental_state", "experimental_value", "experimental_unit", "source_id")
+OPTIONAL_COLUMNS = (
+    "experimental_state",
+    "experimental_value",
+    "experimental_unit",
+    "source_id",
+)
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Estimate or execute research-only Boltz olfactory-receptor binding predictions."
     )
@@ -54,10 +59,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional row limit for a small smoke benchmark.",
     )
-    return parser.parse_args()
+    return parser
 
 
-def load_rows(path: Path, *, limit: int | None = None) -> List[Dict[str, str]]:
+def load_rows(path: Path, *, limit: Optional[int] = None) -> List[Dict[str, str]]:
+    if limit is not None and limit <= 0:
+        raise ValueError("--limit must be greater than zero when provided.")
     if not path.exists():
         raise ValueError(f"Input file does not exist: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -94,7 +101,8 @@ def validate_rows(rows: Iterable[Mapping[str, str]]) -> List[Dict[str, str]]:
         dedupe_key = (receptor_id, sequence, smiles)
         if dedupe_key in seen:
             raise ValueError(
-                f"Row {source_row}: duplicate normalized receptor/ligand pair for {receptor_id} / {compound_id}."
+                f"Row {source_row}: duplicate normalized receptor/ligand pair for "
+                f"{receptor_id} / {compound_id}."
             )
         seen.add(dedupe_key)
         item = {key: row.get(key, "") for key in REQUIRED_COLUMNS + OPTIONAL_COLUMNS}
@@ -140,7 +148,12 @@ def estimate_all(
 def run_all(
     provider: BoltzReceptorBindingProvider,
     rows: Iterable[Mapping[str, str]],
+    *,
+    poll_seconds: float,
+    max_wait_seconds: float,
 ) -> List[Dict[str, object]]:
+    if poll_seconds <= 0 or max_wait_seconds <= 0:
+        raise ValueError("Polling and wait durations must be greater than zero.")
     results: List[Dict[str, object]] = []
     for row in rows:
         started = provider.start(row["receptor_sequence"], row["smiles"])
@@ -155,8 +168,8 @@ def run_all(
         else:
             evidence = provider.wait(
                 resource_id,
-                poll_seconds=ARGS.poll_seconds,
-                max_wait_seconds=ARGS.max_wait_seconds,
+                poll_seconds=poll_seconds,
+                max_wait_seconds=max_wait_seconds,
             )
         results.append(
             {
@@ -183,9 +196,10 @@ def write_jsonl(path: Path, records: Iterable[Mapping[str, object]]) -> None:
     temporary.replace(path)
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
-        rows = validate_rows(load_rows(ARGS.input, limit=ARGS.limit))
+        rows = validate_rows(load_rows(args.input, limit=args.limit))
         provider = build_boltz_provider_from_env()
         if provider is None:
             raise ValueError(
@@ -198,33 +212,36 @@ def main() -> int:
                     "rows": len(rows),
                     "provider": provider.metadata,
                     "estimated_total_cost_usd": str(total_cost),
-                    "execute": ARGS.execute,
+                    "execute": args.execute,
                 },
                 indent=2,
             )
         )
-        if not ARGS.execute:
-            write_jsonl(ARGS.output, ({"estimate": item} for item in estimates))
-            print(f"Cost estimates written to {ARGS.output}")
+        if not args.execute:
+            write_jsonl(args.output, ({"estimate": item} for item in estimates))
+            print(f"Cost estimates written to {args.output}")
             return 0
-        if ARGS.max_total_cost_usd < 0:
+        if args.max_total_cost_usd < 0:
             raise ValueError("--max-total-cost-usd must be non-negative.")
-        if total_cost > ARGS.max_total_cost_usd:
+        if total_cost > args.max_total_cost_usd:
             raise ValueError(
                 f"Estimated total {total_cost} USD exceeds local ceiling "
-                f"{ARGS.max_total_cost_usd} USD; no compute was submitted."
+                f"{args.max_total_cost_usd} USD; no compute was submitted."
             )
-        results = run_all(provider, rows)
-        write_jsonl(ARGS.output, results)
-        print(f"Research evidence written to {ARGS.output}")
+        results = run_all(
+            provider,
+            rows,
+            poll_seconds=args.poll_seconds,
+            max_wait_seconds=args.max_wait_seconds,
+        )
+        write_jsonl(args.output, results)
+        print(f"Research evidence written to {args.output}")
         return 0
     except (ValueError, ReceptorBindingError) as error:
         code = getattr(error, "code", "BENCHMARK_INPUT_ERROR")
         print(f"{code}: {error}", file=sys.stderr)
         return 2
 
-
-ARGS = parse_args()
 
 if __name__ == "__main__":
     raise SystemExit(main())
